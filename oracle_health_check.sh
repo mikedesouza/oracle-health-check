@@ -963,17 +963,12 @@ cross join v$database d;
 prompt
 prompt INVALID OBJECTS COUNT
 prompt ---------------------
-select count(*) as invalid_objects
-from dba_objects
-where status <> 'VALID';
+select count(*) as invalid_objects from dba_objects where status <> 'VALID';
 
 prompt
 prompt FAILED SCHEDULER JOBS IN LAST 24 HOURS
 prompt --------------------------------------
-select count(*) as failed_scheduler_jobs_24h
-from dba_scheduler_job_run_details
-where log_date >= systimestamp - interval '1' day
-  and status not in ('SUCCEEDED', 'RUNNING');
+select count(*) as failed_scheduler_jobs_24h from dba_scheduler_job_run_details where log_date >= systimestamp - interval '1' day and status not in ('SUCCEEDED', 'RUNNING');
 
 prompt
 prompt SESSIONS AND PROCESSES USAGE
