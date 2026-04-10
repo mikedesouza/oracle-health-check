@@ -1,42 +1,73 @@
 #!/usr/bin/env bash
 
-# This script is a safe, read-only Oracle health check for Linux Oracle servers.
-# It reads operating system and Oracle information and writes a timestamped report.
-# It does not change database settings, listener settings, or Oracle files.
+# Oracle health check for Linux Oracle servers.
+# This script is read-only and safe: it only reads data and prints a report.
+# It does not change Oracle, listener, or OS configuration.
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
-OUTPUT_DIR="$SCRIPT_DIR"
-REPORT_FILE=""
+DEFAULT_REPORT_FILE="$SCRIPT_DIR/oracle_health_check_${TIMESTAMP}.log"
+REPORT_FILE="$DEFAULT_REPORT_FILE"
 SILENT_MODE="false"
 DETECTED_PMON_SIDS=""
 ACTIVE_ORACLE_SID="${ORACLE_SID:-}"
 ACTIVE_ORACLE_HOME="${ORACLE_HOME:-}"
 SQLPLUS_BIN=""
 
+# These variables hold the traffic light summary results.
+OVERALL_STATUS="GREEN"
+SYSTEM_STATUS="GREEN"
+FILESYSTEM_STATUS="GREEN"
+MEMORY_STATUS="GREEN"
+CPU_STATUS="GREEN"
+PMON_STATUS="GREEN"
+LISTENER_STATUS_SUMMARY="GREEN"
+DATABASE_STATUS="GREEN"
+DATABASE_DETAIL_MESSAGE="Database checks completed."
+
+# These variables are filled by a small SQL summary query.
+DB_INVALID_OBJECTS="N/A"
+DB_FAILED_JOBS_24H="N/A"
+DB_SESSIONS_PCT="N/A"
+DB_PROCESSES_PCT="N/A"
+DB_TEMP_PCT="N/A"
+DB_FRA_PCT="N/A"
+DB_FRA_DEST="N/A"
+
+show_help() {
+  cat <<'HELP'
+Usage:
+  ./oracle_health_check.sh [-s] [-o report_file] [-h]
+
+Options:
+  -o <file>   Write output to this report file
+  -s          Silent mode. Write report file only
+  -h          Show help
+HELP
+}
+
 parse_args() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -s|--silent)
+  while getopts ":o:sh" opt; do
+    case "$opt" in
+      o)
+        REPORT_FILE="$OPTARG"
+        ;;
+      s)
         SILENT_MODE="true"
-        shift
         ;;
-      -o|--output-dir)
-        if [[ $# -lt 2 ]]; then
-          echo "Missing value for $1"
-          exit 1
-        fi
-        OUTPUT_DIR="$2"
-        shift 2
-        ;;
-      -h|--help)
+      h)
         show_help
         exit 0
         ;;
-      *)
-        echo "Unknown option: $1"
+      :)
+        echo "Option -$OPTARG requires a value."
+        show_help
+        exit 1
+        ;;
+      \?)
+        echo "Unknown option: -$OPTARG"
         show_help
         exit 1
         ;;
@@ -44,21 +75,10 @@ parse_args() {
   done
 }
 
-show_help() {
-  cat <<'HELP'
-Usage:
-  ./oracle_health_check.sh [options]
-
-Options:
-  -s, --silent             Write the report file only, with no screen output
-  -o, --output-dir <dir>   Directory where the timestamped report will be saved
-  -h, --help               Show this help message
-HELP
-}
-
 init_report_output() {
-  mkdir -p "$OUTPUT_DIR"
-  REPORT_FILE="$OUTPUT_DIR/oracle_health_check_${TIMESTAMP}.log"
+  local report_dir
+  report_dir="$(dirname "$REPORT_FILE")"
+  mkdir -p "$report_dir"
 }
 
 print_line() {
@@ -86,6 +106,10 @@ print_kv() {
   printf '%-30s : %s\n' "$1" "$2"
 }
 
+print_status_line() {
+  printf '%-30s : %-6s %s\n' "$1" "$2" "$3"
+}
+
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -102,18 +126,13 @@ database_check_ready() {
   [[ -n "$SQLPLUS_BIN" && -n "$ACTIVE_ORACLE_HOME" && -n "$ACTIVE_ORACLE_SID" ]]
 }
 
-print_status_line() {
-  printf '%-30s : %-8s %s\n' "$1" "$2" "$3"
-}
-
-run_if_exists() {
-  local cmd="$1"
-  shift
-
-  if command_exists "$cmd"; then
-    "$cmd" "$@"
-  else
-    echo "Command '$cmd' is not available."
+set_status() {
+  # RED is the highest severity, then AMBER, then GREEN.
+  local new_status="$1"
+  if [[ "$new_status" == "RED" ]]; then
+    OVERALL_STATUS="RED"
+  elif [[ "$new_status" == "AMBER" && "$OVERALL_STATUS" != "RED" ]]; then
+    OVERALL_STATUS="AMBER"
   fi
 }
 
@@ -232,6 +251,7 @@ get_sqlplus_path() {
 resolve_oracle_environment() {
   detect_pmon_sids
 
+  # If ORACLE_SID is missing and exactly one PMON SID is found, use it.
   if [[ -z "$ACTIVE_ORACLE_SID" && -n "$DETECTED_PMON_SIDS" ]]; then
     if [[ "$DETECTED_PMON_SIDS" == *,* ]]; then
       ACTIVE_ORACLE_SID=""
@@ -242,6 +262,7 @@ resolve_oracle_environment() {
 
   SQLPLUS_BIN="$(get_sqlplus_path)"
 
+  # If sqlplus exists, we can often infer ORACLE_HOME from it.
   if [[ -z "$ACTIVE_ORACLE_HOME" && -n "$SQLPLUS_BIN" ]]; then
     ACTIVE_ORACLE_HOME="$(cd "$(dirname "$SQLPLUS_BIN")/.." 2>/dev/null && pwd)"
   fi
@@ -259,59 +280,11 @@ show_oracle_environment_summary() {
   print_kv "lsnrctl available" "$( command_exists lsnrctl && echo Yes || echo No )"
 }
 
-show_executive_summary() {
-  print_header "EXECUTIVE SUMMARY"
-
-  print_status_line "System details" "OK" "Hostname and date/time collected."
-
-  if command_exists df; then
-    print_status_line "Filesystem usage" "OK" "Filesystem command is available."
-  else
-    print_status_line "Filesystem usage" "WARNING" "Filesystem command is not available."
-  fi
-
-  if memory_source_available; then
-    print_status_line "Memory usage" "OK" "Memory source is available."
-  else
-    print_status_line "Memory usage" "WARNING" "Memory source is not available."
-  fi
-
-  if ps_source_available; then
-    print_status_line "Top CPU processes" "OK" "Process list command is available."
-  else
-    print_status_line "Top CPU processes" "WARNING" "Process list command is not available."
-  fi
-
-  if [[ -n "$DETECTED_PMON_SIDS" ]]; then
-    print_status_line "Oracle PMON" "OK" "Detected PMON SIDs: $DETECTED_PMON_SIDS"
-  elif ps_source_available; then
-    print_status_line "Oracle PMON" "WARNING" "No PMON processes were detected."
-  else
-    print_status_line "Oracle PMON" "SKIPPED" "Process list command is not available."
-  fi
-
-  if command_exists lsnrctl; then
-    print_status_line "Listener status" "OK" "lsnrctl is available."
-  else
-    print_status_line "Listener status" "SKIPPED" "lsnrctl is not available."
-  fi
-
-  if [[ -z "$SQLPLUS_BIN" ]]; then
-    print_status_line "Database checks" "SKIPPED" "sqlplus is not available."
-  elif database_check_ready; then
-    print_status_line "Database checks" "OK" "sqlplus and Oracle environment are ready."
-  elif [[ -n "$DETECTED_PMON_SIDS" && "$DETECTED_PMON_SIDS" == *,* && -z "${ORACLE_SID:-}" ]]; then
-    print_status_line "Database checks" "SKIPPED" "Multiple PMON SIDs found. Set ORACLE_SID first."
-  else
-    print_status_line "Database checks" "SKIPPED" "ORACLE_HOME or ORACLE_SID is not fully resolved."
-  fi
-}
-
 show_missing_env_guidance() {
   echo "Oracle environment variables are missing or incomplete for database checks."
   echo
-  if [[ -z "${ORACLE_HOME:-}" ]]; then
-    echo "- ORACLE_HOME is not set."
+  if [[ -z "${ORACLE_HOME:-}" && -z "$ACTIVE_ORACLE_HOME" ]]; then
+    echo "- ORACLE_HOME is not set and could not be resolved from sqlplus."
   fi
 
   if [[ -z "${ORACLE_SID:-}" ]]; then
@@ -332,12 +305,146 @@ show_missing_env_guidance() {
   echo "  export PATH=\$ORACLE_HOME/bin:\$PATH"
 }
 
+collect_database_summary_metrics() {
+  local sqlplus_bin="$1"
+  local oracle_sid="$2"
+  local raw_output
+
+  raw_output="$(ORACLE_SID="$oracle_sid" "$sqlplus_bin" -s / as sysdba <<'SQL'
+set pagesize 0 linesize 400 trimspool on feedback off verify off heading off echo off timing off
+select
+  nvl((select count(*) from dba_objects where status <> 'VALID'), 0) || '|' ||
+  nvl((select count(*) from dba_scheduler_job_run_details
+       where log_date >= systimestamp - interval '1' day
+         and status not in ('SUCCEEDED', 'RUNNING')), 0) || '|' ||
+  nvl((select round((current_utilization / to_number(limit_value)) * 100, 2)
+       from v\$resource_limit
+       where resource_name = 'sessions'
+         and regexp_like(limit_value, '^[0-9]+$')), 0) || '|' ||
+  nvl((select round((current_utilization / to_number(limit_value)) * 100, 2)
+       from v\$resource_limit
+       where resource_name = 'processes'
+         and regexp_like(limit_value, '^[0-9]+$')), 0) || '|' ||
+  nvl((select round(max((bytes_used / nullif(bytes_used + bytes_free, 0)) * 100), 2)
+       from v\$temp_space_header), 0) || '|' ||
+  nvl((select round((space_used / nullif(space_limit, 0)) * 100, 2)
+       from v\$recovery_file_dest), 0) || '|' ||
+  nvl((select max(name) from v\$recovery_file_dest), 'Not configured')
+from dual;
+exit
+SQL
+)"
+
+  raw_output="$(printf '%s\n' "$raw_output" | tail -n 1 | tr -d '\r')"
+  IFS='|' read -r DB_INVALID_OBJECTS DB_FAILED_JOBS_24H DB_SESSIONS_PCT DB_PROCESSES_PCT DB_TEMP_PCT DB_FRA_PCT DB_FRA_DEST <<< "$raw_output"
+
+  DB_INVALID_OBJECTS="${DB_INVALID_OBJECTS:-N/A}"
+  DB_FAILED_JOBS_24H="${DB_FAILED_JOBS_24H:-N/A}"
+  DB_SESSIONS_PCT="${DB_SESSIONS_PCT:-N/A}"
+  DB_PROCESSES_PCT="${DB_PROCESSES_PCT:-N/A}"
+  DB_TEMP_PCT="${DB_TEMP_PCT:-N/A}"
+  DB_FRA_PCT="${DB_FRA_PCT:-N/A}"
+  DB_FRA_DEST="${DB_FRA_DEST:-N/A}"
+}
+
+number_ge() {
+  awk -v left="$1" -v right="$2" 'BEGIN { exit !(left + 0 >= right + 0) }'
+}
+
+evaluate_summary_statuses() {
+  local max_usage
+
+  OVERALL_STATUS="GREEN"
+  SYSTEM_STATUS="GREEN"
+
+  if command_exists df; then
+    FILESYSTEM_STATUS="GREEN"
+  else
+    FILESYSTEM_STATUS="AMBER"
+    set_status "AMBER"
+  fi
+
+  if memory_source_available; then
+    MEMORY_STATUS="GREEN"
+  else
+    MEMORY_STATUS="AMBER"
+    set_status "AMBER"
+  fi
+
+  if ps_source_available; then
+    CPU_STATUS="GREEN"
+  else
+    CPU_STATUS="AMBER"
+    set_status "AMBER"
+  fi
+
+  if [[ -n "$DETECTED_PMON_SIDS" ]]; then
+    PMON_STATUS="GREEN"
+  else
+    PMON_STATUS="AMBER"
+    set_status "AMBER"
+  fi
+
+  if command_exists lsnrctl; then
+    LISTENER_STATUS_SUMMARY="GREEN"
+  else
+    LISTENER_STATUS_SUMMARY="AMBER"
+    set_status "AMBER"
+  fi
+
+  if ! database_check_ready; then
+    DATABASE_STATUS="AMBER"
+    DATABASE_DETAIL_MESSAGE="Database checks are partially unavailable."
+    set_status "AMBER"
+    return
+  fi
+
+  collect_database_summary_metrics "$SQLPLUS_BIN" "$ACTIVE_ORACLE_SID"
+
+  DATABASE_STATUS="GREEN"
+  DATABASE_DETAIL_MESSAGE="No database warning thresholds were hit."
+  max_usage="$DB_SESSIONS_PCT"
+  if number_ge "$DB_PROCESSES_PCT" "$max_usage"; then
+    max_usage="$DB_PROCESSES_PCT"
+  fi
+
+  if number_ge "$DB_INVALID_OBJECTS" 100 || \
+     number_ge "$DB_FAILED_JOBS_24H" 10 || \
+     number_ge "$max_usage" 95 || \
+     number_ge "$DB_TEMP_PCT" 95 || \
+     number_ge "$DB_FRA_PCT" 95; then
+    DATABASE_STATUS="RED"
+    DATABASE_DETAIL_MESSAGE="At least one database threshold is in the critical range."
+    set_status "RED"
+  elif number_ge "$DB_INVALID_OBJECTS" 1 || \
+       number_ge "$DB_FAILED_JOBS_24H" 1 || \
+       number_ge "$max_usage" 85 || \
+       number_ge "$DB_TEMP_PCT" 85 || \
+       number_ge "$DB_FRA_PCT" 85; then
+    DATABASE_STATUS="AMBER"
+    DATABASE_DETAIL_MESSAGE="At least one database threshold is in the warning range."
+    set_status "AMBER"
+  fi
+}
+
+show_traffic_light_summary() {
+  print_header "TRAFFIC LIGHT SUMMARY"
+  print_status_line "Overall status" "$OVERALL_STATUS" "GREEN is healthy, AMBER needs attention, RED is critical."
+  print_status_line "System details" "$SYSTEM_STATUS" "Basic server identity checks completed."
+  print_status_line "Filesystem usage" "$FILESYSTEM_STATUS" "Filesystem information was checked."
+  print_status_line "Memory usage" "$MEMORY_STATUS" "Memory information was checked."
+  print_status_line "Top CPU processes" "$CPU_STATUS" "Process information was checked."
+  print_status_line "Oracle PMON" "$PMON_STATUS" "PMON discovery checked for running Oracle instances."
+  print_status_line "Listener status" "$LISTENER_STATUS_SUMMARY" "Listener command availability was checked."
+  print_status_line "Database checks" "$DATABASE_STATUS" "$DATABASE_DETAIL_MESSAGE"
+}
+
 run_sqlplus_health_query() {
   local sqlplus_bin="$1"
   local oracle_sid="$2"
 
   ORACLE_SID="$oracle_sid" "$sqlplus_bin" -s / as sysdba <<'SQL'
-set pagesize 200 linesize 200 trimspool on feedback off verify off heading on echo off timing off
+set pagesize 200 linesize 220 trimspool on feedback off verify off heading on echo off timing off
 
 prompt
 prompt DATABASE INSTANCE STATUS
@@ -361,27 +468,69 @@ from v$instance i
 cross join v$database d;
 
 prompt
-prompt ARCHIVE LOG MODE
-prompt ----------------
+prompt ARCHIVE LOG MODE AND FRA DESTINATION
+prompt ------------------------------------
 col log_mode format a15
 col force_logging format a15
 col flashback_on format a15
-select log_mode, force_logging, flashback_on from v$database;
+col fra_name format a55
+select d.log_mode,
+       d.force_logging,
+       d.flashback_on,
+       r.name as fra_name,
+       round((r.space_used / nullif(r.space_limit, 0)) * 100, 2) as fra_pct_used
+from v$database d
+left join v$recovery_file_dest r on 1 = 1;
 
 prompt
-prompt FRA USAGE
-prompt ---------
-col name format a45
-col space_limit_gb format 9999990.00
-col space_used_gb format 9999990.00
-col space_reclaimable_gb format 9999990.00
-select
-  name,
-  round(space_limit/1024/1024/1024, 2) as space_limit_gb,
-  round(space_used/1024/1024/1024, 2) as space_used_gb,
-  round(space_reclaimable/1024/1024/1024, 2) as space_reclaimable_gb,
-  number_of_files
-from v$recovery_file_dest;
+prompt INVALID OBJECTS COUNT
+prompt ---------------------
+select count(*) as invalid_objects
+from dba_objects
+where status <> 'VALID';
+
+prompt
+prompt FAILED SCHEDULER JOBS IN LAST 24 HOURS
+prompt --------------------------------------
+select count(*) as failed_scheduler_jobs_24h
+from dba_scheduler_job_run_details
+where log_date >= systimestamp - interval '1' day
+  and status not in ('SUCCEEDED', 'RUNNING');
+
+prompt
+prompt SESSIONS AND PROCESSES USAGE
+prompt ----------------------------
+col resource_name format a15
+col current_utilization format 99999999
+col limit_value format a15
+col pct_used format 990.00
+select resource_name,
+       current_utilization,
+       limit_value,
+       case
+         when regexp_like(limit_value, '^[0-9]+$') and to_number(limit_value) > 0
+           then round((current_utilization / to_number(limit_value)) * 100, 2)
+         else null
+       end as pct_used
+from v$resource_limit
+where resource_name in ('sessions', 'processes')
+order by resource_name;
+
+prompt
+prompt TEMP TABLESPACE USAGE
+prompt ---------------------
+col tablespace_name format a30
+col total_mb format 99999990.00
+col used_mb format 99999990.00
+col free_mb format 99999990.00
+col pct_used format 990.00
+select tablespace_name,
+       round((bytes_used + bytes_free) / 1024 / 1024, 2) as total_mb,
+       round(bytes_used / 1024 / 1024, 2) as used_mb,
+       round(bytes_free / 1024 / 1024, 2) as free_mb,
+       round((bytes_used / nullif(bytes_used + bytes_free, 0)) * 100, 2) as pct_used
+from v$temp_space_header
+order by pct_used desc, tablespace_name;
 
 prompt
 prompt TABLESPACE USAGE SUMMARY
@@ -414,7 +563,7 @@ order by pct_used desc, df.tablespace_name;
 prompt
 prompt ALERT LOG LOCATION
 prompt ------------------
-col value format a100
+col value format a110
 select name, value
 from v$diag_info
 where name in ('Diag Trace', 'Diag Alert', 'Default Trace File');
@@ -463,7 +612,11 @@ show_system_details() {
 
 show_filesystem_usage() {
   print_header "FILESYSTEM USAGE"
-  run_if_exists df -hP
+  if command_exists df; then
+    df -hP
+  else
+    echo "Command 'df' is not available."
+  fi
 }
 
 show_memory_section() {
@@ -492,7 +645,7 @@ generate_report() {
   echo "It reads health information and writes a report file."
   echo "It does not make Oracle or OS configuration changes."
 
-  show_executive_summary
+  show_traffic_light_summary
   show_system_details
   show_filesystem_usage
   show_memory_section
@@ -514,6 +667,7 @@ main() {
   parse_args "$@"
   init_report_output
   resolve_oracle_environment
+  evaluate_summary_statuses
 
   if [[ "$SILENT_MODE" == "true" ]]; then
     generate_report >"$REPORT_FILE" 2>&1

@@ -1,3 +1,4 @@
 .DS_Store
 *.log
 *.log
+oracle_health_check_*.log

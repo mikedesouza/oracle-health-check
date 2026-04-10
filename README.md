@@ -1,6 +1,6 @@
 # Oracle Health Check Tool
 
-This project is a beginner-friendly, read-only Oracle health check tool for real Linux Oracle database servers.
+This project is a beginner-friendly, read-only Oracle health check tool for Linux Oracle database servers.
 
 The main script is:
 
@@ -24,13 +24,11 @@ It only reads information and writes a plain text report file.
 
 ## New Features In This Version
 
-- clear section headings
+- a traffic light summary at the top with `GREEN`, `AMBER`, and `RED`
+- command line options: `-o <file>`, `-s`, and `-h`
+- Oracle checks for invalid objects, failed scheduler jobs, sessions vs processes usage, temp usage, and FRA usage
 - clean colorless output
-- graceful handling when `ORACLE_HOME` or `ORACLE_SID` is missing
-- support for multiple PMON processes
-- automatic timestamped report files
-- optional silent mode that only writes the report file
-- a short executive summary with `OK`, `WARNING`, and `SKIPPED`
+- beginner-friendly comments inside the script
 
 ## What It Checks
 
@@ -48,8 +46,11 @@ The script displays:
 - database open mode
 - database role
 - startup time
-- archive log mode
-- FRA usage if available
+- invalid objects count
+- failed scheduler jobs in last 24 hours
+- sessions vs processes usage
+- temp tablespace usage
+- archive log destination / FRA usage where available
 - tablespace usage summary
 - alert log location if available
 
@@ -89,46 +90,42 @@ chmod +x oracle_health_check.sh
 ./oracle_health_check.sh
 ```
 
-6. The script will print the report and also save a timestamped report file in the same folder.
+6. The script prints the report and saves a report file.
 
-Near the top of the report, you will also see a short summary section that quickly shows the status of major areas:
+## Traffic Light Summary
 
-- `OK`
-- `WARNING`
-- `SKIPPED`
+At the top of the report, you will see a simple summary:
 
-Example report file name:
+- `GREEN` means healthy
+- `AMBER` means a warning or something needs attention
+- `RED` means a critical threshold was hit
 
-```text
-oracle_health_check_20260410_143000.log
-```
+The overall status is based on what the script can see safely.
 
-## Silent Mode
+## Command Line Options
 
-If you want the script to only write the report file and not print to the screen, use:
+Show help:
 
 ```bash
-./oracle_health_check.sh --silent
+./oracle_health_check.sh -h
 ```
 
-Short option:
+Run silently and only write the report file:
 
 ```bash
 ./oracle_health_check.sh -s
 ```
 
-## Custom Output Directory
-
-If you want the report written to a different directory, use:
+Write to a specific report file:
 
 ```bash
-./oracle_health_check.sh --output-dir /tmp/oracle_reports
+./oracle_health_check.sh -o /tmp/oracle_health_prod1.log
 ```
 
-You can combine both options:
+Use both together:
 
 ```bash
-./oracle_health_check.sh --silent --output-dir /tmp/oracle_reports
+./oracle_health_check.sh -s -o /tmp/oracle_health_prod1.log
 ```
 
 ## Best Practice For Oracle Checks
@@ -160,6 +157,7 @@ If `ORACLE_HOME` is missing:
 
 - the script still runs OS checks
 - it checks whether `sqlplus` is already on `PATH`
+- if possible, it resolves `ORACLE_HOME` from the `sqlplus` binary path
 - if needed, it explains that database checks were skipped
 
 If `ORACLE_SID` is missing:
@@ -167,17 +165,6 @@ If `ORACLE_SID` is missing:
 - the script still runs OS checks
 - if exactly one PMON process is found, it uses that SID automatically
 - if multiple PMON processes are found, it tells you to set `ORACLE_SID` explicitly
-
-## Multiple PMON Support
-
-The script looks for multiple `ora_pmon_<SID>` processes.
-
-It shows:
-
-- the PMON process list
-- the detected SID names
-
-This is helpful on Linux servers that host more than one Oracle instance.
 
 ## Example Commands
 
@@ -187,10 +174,10 @@ Run standard report:
 ./oracle_health_check.sh
 ```
 
-Run silently and save the report only:
+Run silently and write a named report file:
 
 ```bash
-./oracle_health_check.sh --silent
+./oracle_health_check.sh -s -o /var/tmp/oracle_prod1_health.log
 ```
 
 Run with Oracle environment set:
@@ -199,51 +186,15 @@ Run with Oracle environment set:
 export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
 export ORACLE_SID=PROD1
 export PATH=$ORACLE_HOME/bin:$PATH
-./oracle_health_check.sh
-```
-
-Run with a custom report directory:
-
-```bash
-./oracle_health_check.sh --output-dir /var/tmp/oracle_health_reports
+./oracle_health_check.sh -o /tmp/prod1_health.log
 ```
 
 ## Notes
 
 - `lsnrctl` is optional. If it does not exist, listener checks are skipped.
 - FRA information depends on Oracle configuration and privileges.
-- Tablespace and diagnostic queries require access to Oracle dynamic and DBA views.
+- Scheduler, object, temp, and tablespace queries require Oracle access to dynamic and DBA views.
 - If the current user does not have the needed privileges, Oracle may return an error for some database sections while the rest of the report still prints.
-
-## Troubleshooting
-
-If the script says `sqlplus is not available`:
-
-- check that Oracle binaries are installed
-- check that `$ORACLE_HOME/bin` is in `PATH`
-
-If the script says multiple PMON processes were found:
-
-- set `ORACLE_SID` to the instance you want to check
-
-Example:
-
-```bash
-export ORACLE_SID=PROD1
-./oracle_health_check.sh
-```
-
-If the script says `ORACLE_HOME` is not set:
-
-- set `ORACLE_HOME`
-- add `$ORACLE_HOME/bin` to `PATH`
-
-Example:
-
-```bash
-export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
-export PATH=$ORACLE_HOME/bin:$PATH
-```
 
 ## Read-Only Reminder
 
