@@ -27,6 +27,7 @@ It only reads information and writes a plain text report file.
 ## New Features In This Version
 
 - RAC awareness
+- multitenant awareness
 - Data Guard awareness
 - traffic light logic for RAC and Data Guard
 - graceful handling when RAC or Data Guard views are unavailable
@@ -47,6 +48,7 @@ The script displays:
 - listener status if `lsnrctl` exists
 - traffic light summary with `GREEN`, `AMBER`, and `RED`
 - RAC summary
+- multitenant summary
 - Data Guard summary
 - database instance status if `sqlplus` works
 - invalid objects count
@@ -73,6 +75,13 @@ The RAC summary section shows:
 - instance status and startup time
 
 If `gv$instance` is unavailable, the script handles that safely and continues.
+
+The script also checks multitenant information when available:
+
+- whether the database is a CDB
+- current container name
+- PDB count
+
 
 ## Data Guard Awareness
 
@@ -231,6 +240,25 @@ If `ORACLE_SID` is missing:
 - the script still runs OS checks
 - if exactly one PMON process is found, it uses that SID automatically
 - if multiple PMON processes are found, it tells you to set `ORACLE_SID` explicitly
+
+## Troubleshooting Real RAC Servers
+
+If your server has multiple PMON processes, set `ORACLE_SID` to the specific instance you want to query before running the script.
+
+Example:
+
+```bash
+export ORACLE_SID=ivory1
+./oracle_health_check.sh -o /tmp/rac_health_ivory1.log
+```
+
+For RAC detection, the script now uses multiple signals:
+
+- `cluster_database` from `v$parameter`
+- instance count from `gv$instance`
+- PMON detection as a fallback
+
+For multitenant visibility, it checks `v$database`, `sys_context('USERENV','CON_NAME')`, and `v$pdbs` when available.
 
 ## Notes
 

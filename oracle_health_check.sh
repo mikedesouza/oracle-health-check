@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Oracle health check for Linux Oracle servers.
-# This script is read-only and safe: it only reads data and prints a report.
-# It does not change Oracle, listener, cluster, Data Guard, or OS configuration.
+# This script is read-only and safe: it only reads information and writes a text report.
+# It does not change Oracle, RAC, Data Guard, listener, or Linux configuration.
 
 set -u
 
@@ -11,6 +11,7 @@ TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 DEFAULT_REPORT_FILE="$SCRIPT_DIR/oracle_health_check_${TIMESTAMP}.log"
 REPORT_FILE="$DEFAULT_REPORT_FILE"
 SILENT_MODE="false"
+
 DETECTED_PMON_SIDS=""
 ACTIVE_ORACLE_SID="${ORACLE_SID:-}"
 ACTIVE_ORACLE_HOME="${ORACLE_HOME:-}"
@@ -51,6 +52,7 @@ CURRENT_STARTUP_TIME="N/A"
 ALL_INSTANCES_SUMMARY="N/A"
 RAC_VIEW_AVAILABLE="N"
 RAC_INSTANCE_ISSUE="N"
+RAC_INSTANCE_COUNT="N/A"
 
 DATABASE_ROLE="N/A"
 OPEN_MODE="N/A"
@@ -82,12 +84,8 @@ HELP
 parse_args() {
   while getopts ":o:sh" opt; do
     case "$opt" in
-      o)
-        REPORT_FILE="$OPTARG"
-        ;;
-      s)
-        SILENT_MODE="true"
-        ;;
+      o) REPORT_FILE="$OPTARG" ;;
+      s) SILENT_MODE="true" ;;
       h)
         show_help
         exit 0
@@ -311,6 +309,7 @@ show_oracle_environment_summary() {
 show_missing_env_guidance() {
   echo "Oracle environment variables are missing or incomplete for database checks."
   echo
+
   if [[ -z "${ORACLE_HOME:-}" && -z "$ACTIVE_ORACLE_HOME" ]]; then
     echo "- ORACLE_HOME is not set and could not be resolved from sqlplus."
   fi
@@ -333,66 +332,46 @@ show_missing_env_guidance() {
   echo "  export PATH=\$ORACLE_HOME/bin:\$PATH"
 }
 
-capture_sqlplus_kv() {
+sqlplus_scalar() {
   local sql_text="$1"
+  local output=""
+
+  output="$({
+    ORACLE_SID="$ACTIVE_ORACLE_SID" "$SQLPLUS_BIN" -s / as sysdba <<SQL
+set pagesize 0 linesize 400 trimspool on feedback off verify off heading off echo off timing off serveroutput off termout on tab off
+whenever sqlerror continue
+$sql_text
+exit
+SQL
+  } 2>&1)"
+
+  printf '%s\n' "$output" | tr -d '\r' | awk 'NF {print; exit}'
+}
+
+sqlplus_report_block() {
+  local title="$1"
+  local sql_text="$2"
+
+  print_subheader "$title"
   ORACLE_SID="$ACTIVE_ORACLE_SID" "$SQLPLUS_BIN" -s / as sysdba <<SQL
-set pagesize 0 linesize 400 trimspool on feedback off verify off heading off echo off timing off serveroutput off
+set pagesize 200 linesize 220 trimspool on feedback off verify off heading on echo off timing off serveroutput off termout on tab off
 whenever sqlerror continue
 $sql_text
 exit
 SQL
 }
 
-consume_kv_lines() {
-  local raw_output="$1"
-  local line key value
+set_metric_from_query() {
+  local var_name="$1"
+  local sql_text="$2"
+  local value=""
 
-  while IFS= read -r line; do
-    case "$line" in
-      *=*)
-        key="${line%%=*}"
-        value="${line#*=}"
-        case "$key" in
-          CLUSTER_DATABASE_ENABLED) CLUSTER_DATABASE_ENABLED="$value" ;;
-          RAC_MODE) RAC_MODE="$value" ;;
-          CURRENT_INSTANCE_NAME) CURRENT_INSTANCE_NAME="$value" ;;
-          CURRENT_HOST_NAME) CURRENT_HOST_NAME="$value" ;;
-          CURRENT_INSTANCE_STATUS) CURRENT_INSTANCE_STATUS="$value" ;;
-          CURRENT_STARTUP_TIME) CURRENT_STARTUP_TIME="$value" ;;
-          ALL_INSTANCES_SUMMARY) ALL_INSTANCES_SUMMARY="$value" ;;
-          RAC_VIEW_AVAILABLE) RAC_VIEW_AVAILABLE="$value" ;;
-          RAC_INSTANCE_ISSUE) RAC_INSTANCE_ISSUE="$value" ;;
-          DATABASE_ROLE) DATABASE_ROLE="$value" ;;
-          OPEN_MODE) OPEN_MODE="$value" ;;
-          PROTECTION_MODE) PROTECTION_MODE="$value" ;;
-          SWITCHOVER_STATUS) SWITCHOVER_STATUS="$value" ;;
-          FORCE_LOGGING) FORCE_LOGGING="$value" ;;
-          ARCHIVE_LOG_MODE) ARCHIVE_LOG_MODE="$value" ;;
-          TRANSPORT_LAG) TRANSPORT_LAG="$value" ;;
-          APPLY_LAG) APPLY_LAG="$value" ;;
-          TRANSPORT_LAG_MINUTES) TRANSPORT_LAG_MINUTES="$value" ;;
-          APPLY_LAG_MINUTES) APPLY_LAG_MINUTES="$value" ;;
-          MANAGED_RECOVERY_STATUS) MANAGED_RECOVERY_STATUS="$value" ;;
-          ARCHIVE_DEST_ERROR_COUNT) ARCHIVE_DEST_ERROR_COUNT="$value" ;;
-          ARCHIVE_DEST_ERRORS) ARCHIVE_DEST_ERRORS="$value" ;;
-          DG_VIEW_AVAILABLE) DG_VIEW_AVAILABLE="$value" ;;
-          DB_INVALID_OBJECTS) DB_INVALID_OBJECTS="$value" ;;
-          DB_FAILED_JOBS_24H) DB_FAILED_JOBS_24H="$value" ;;
-          DB_SESSIONS_PCT) DB_SESSIONS_PCT="$value" ;;
-          DB_PROCESSES_PCT) DB_PROCESSES_PCT="$value" ;;
-          DB_TEMP_PCT) DB_TEMP_PCT="$value" ;;
-          DB_FRA_PCT) DB_FRA_PCT="$value" ;;
-          DB_FRA_DEST) DB_FRA_DEST="$value" ;;
-          ALERT_LOG_LOCATION) ALERT_LOG_LOCATION="$value" ;;
-          CDB_ENABLED) CDB_ENABLED="$value" ;;
-          CURRENT_CONTAINER_NAME) CURRENT_CONTAINER_NAME="$value" ;;
-          PDB_COUNT) PDB_COUNT="$value" ;;
-        esac
-        ;;
-    esac
-  done <<EOF
-$raw_output
-EOF
+  value="$(sqlplus_scalar "$sql_text")"
+  if [[ -n "$value" && "$value" != ORA-* && "$value" != SP2-* ]]; then
+    printf -v "$var_name" '%s' "$value"
+    return 0
+  fi
+  return 1
 }
 
 lag_to_minutes() {
@@ -418,73 +397,6 @@ lag_to_minutes() {
   '
 }
 
-collect_database_summary_metrics() {
-  local rac_sql dg_sql db_sql output
-
-  rac_sql=$(cat <<'SQL'
-select 'CLUSTER_DATABASE_ENABLED=' || nvl((select value from v$parameter where name = 'cluster_database'), 'UNKNOWN') from dual;
-select 'RAC_MODE=' || case nvl((select value from v$parameter where name = 'cluster_database'), 'UNKNOWN') when 'TRUE' then 'RAC' when 'FALSE' then 'STANDALONE' else 'UNKNOWN' end from dual;
-select 'CURRENT_INSTANCE_NAME=' || instance_name from v$instance;
-select 'CURRENT_HOST_NAME=' || host_name from v$instance;
-select 'CURRENT_INSTANCE_STATUS=' || status from v$instance;
-select 'CURRENT_STARTUP_TIME=' || to_char(startup_time, 'YYYY-MM-DD HH24:MI:SS') from v$instance;
-select 'ALL_INSTANCES_SUMMARY=' || nvl((select listagg('inst ' || inst_id || ':' || instance_name || '@' || host_name || ':' || status || ':' || to_char(startup_time, 'YYYY-MM-DD HH24:MI:SS'), ' | ') within group(order by inst_id) from gv$instance), 'N/A') from dual;
-select 'RAC_VIEW_AVAILABLE=Y' from dual;
-select 'RAC_INSTANCE_ISSUE=' || case when exists (select 1 from gv$instance where upper(status) not in ('OPEN', 'MOUNTED')) then 'Y' else 'N' end from dual;
-select 'CDB_ENABLED=' || cdb from v$database;
-select 'CURRENT_CONTAINER_NAME=' || sys_context('USERENV', 'CON_NAME') from dual;
-select 'PDB_COUNT=' || count(*) from v$pdbs;
-SQL
-)
-  output="$(capture_sqlplus_kv "$rac_sql")"
-  consume_kv_lines "$output"
-  if [[ "$output" == *"ORA-"* || "$output" == *"SP2-"* ]]; then
-    RAC_VIEW_AVAILABLE="N"
-  fi
-
-  dg_sql=$(cat <<'SQL'
-select 'DATABASE_ROLE=' || database_role from v$database;
-select 'OPEN_MODE=' || open_mode from v$database;
-select 'PROTECTION_MODE=' || protection_mode from v$database;
-select 'SWITCHOVER_STATUS=' || switchover_status from v$database;
-select 'FORCE_LOGGING=' || force_logging from v$database;
-select 'ARCHIVE_LOG_MODE=' || log_mode from v$database;
-select 'TRANSPORT_LAG=' || nvl((select max(value) from v$dataguard_stats where name = 'transport lag'), 'N/A') from dual;
-select 'APPLY_LAG=' || nvl((select max(value) from v$dataguard_stats where name = 'apply lag'), 'N/A') from dual;
-select 'DG_VIEW_AVAILABLE=Y' from dual;
-select 'ARCHIVE_DEST_ERROR_COUNT=' || count(*) from v$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR');
-select 'ARCHIVE_DEST_ERRORS=' || nvl((select listagg(dest_id || ':' || error, '; ') within group(order by dest_id) from v$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR')), 'None') from dual;
-select 'MANAGED_RECOVERY_STATUS=' || nvl((select listagg(process || ':' || status, '; ') within group(order by process) from v$managed_standby where process like 'MRP%'), 'Not applicable') from dual;
-SQL
-)
-  output="$(capture_sqlplus_kv "$dg_sql")"
-  consume_kv_lines "$output"
-  if [[ "$output" == *"ORA-"* || "$output" == *"SP2-"* ]]; then
-    DG_VIEW_AVAILABLE="N"
-  fi
-
-  db_sql=$(cat <<'SQL'
-select 'DB_INVALID_OBJECTS=' || count(*) from dba_objects where status <> 'VALID';
-select 'DB_FAILED_JOBS_24H=' || count(*) from dba_scheduler_job_run_details where log_date >= systimestamp - interval '1' day and status not in ('SUCCEEDED', 'RUNNING');
-select 'DB_SESSIONS_PCT=' || nvl((select to_char(round((current_utilization / to_number(limit_value)) * 100, 2)) from v$resource_limit where resource_name = 'sessions' and regexp_like(limit_value, '^[0-9]+$')), 'N/A') from dual;
-select 'DB_PROCESSES_PCT=' || nvl((select to_char(round((current_utilization / to_number(limit_value)) * 100, 2)) from v$resource_limit where resource_name = 'processes' and regexp_like(limit_value, '^[0-9]+$')), 'N/A') from dual;
-select 'DB_TEMP_PCT=' || nvl((select to_char(round(max((bytes_used / nullif(bytes_used + bytes_free, 0)) * 100), 2)) from v$temp_space_header), 'N/A') from dual;
-select 'DB_FRA_PCT=' || nvl((select to_char(round((space_used / nullif(space_limit, 0)) * 100, 2)) from v$recovery_file_dest), 'N/A') from dual;
-select 'DB_FRA_DEST=' || nvl((select max(name) from v$recovery_file_dest), 'N/A') from dual;
-select 'ALERT_LOG_LOCATION=' || nvl((select max(value) from v$diag_info where name = 'Diag Alert'), 'N/A') from dual;
-SQL
-)
-  output="$(capture_sqlplus_kv "$db_sql")"
-  consume_kv_lines "$output"
-
-  TRANSPORT_LAG_MINUTES="$(lag_to_minutes "$TRANSPORT_LAG")"
-  APPLY_LAG_MINUTES="$(lag_to_minutes "$APPLY_LAG")"
-
-  if [[ "$DATABASE_ROLE" == "LOGICAL STANDBY" && "$MANAGED_RECOVERY_STATUS" == "Not applicable" ]]; then
-    MANAGED_RECOVERY_STATUS="Logical standby - check SQL Apply separately"
-  fi
-}
-
 number_ge() {
   awk -v left="$1" -v right="$2" 'BEGIN { exit !(left + 0 >= right + 0) }'
 }
@@ -493,20 +405,88 @@ value_known_number() {
   [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]
 }
 
+collect_database_summary_metrics() {
+  set_metric_from_query CLUSTER_DATABASE_ENABLED "select value from v\$parameter where name = 'cluster_database';" || true
+  set_metric_from_query CURRENT_INSTANCE_NAME "select instance_name from v\$instance;" || true
+  set_metric_from_query CURRENT_HOST_NAME "select host_name from v\$instance;" || true
+  set_metric_from_query CURRENT_INSTANCE_STATUS "select status from v\$instance;" || true
+  set_metric_from_query CURRENT_STARTUP_TIME "select to_char(startup_time, 'YYYY-MM-DD HH24:MI:SS') from v\$instance;" || true
+
+  if set_metric_from_query RAC_INSTANCE_COUNT "select count(*) from gv\$instance;"; then
+    RAC_VIEW_AVAILABLE="Y"
+    set_metric_from_query ALL_INSTANCES_SUMMARY "select listagg('inst ' || inst_id || ':' || instance_name || '@' || host_name || ':' || status || ':' || to_char(startup_time, 'YYYY-MM-DD HH24:MI:SS'), ' | ') within group(order by inst_id) from gv\$instance;" || true
+    set_metric_from_query RAC_INSTANCE_ISSUE "select case when exists (select 1 from gv\$instance where upper(status) not in ('OPEN', 'MOUNTED')) then 'Y' else 'N' end from dual;" || true
+  else
+    RAC_VIEW_AVAILABLE="N"
+  fi
+
+  if [[ "$CLUSTER_DATABASE_ENABLED" == "TRUE" ]]; then
+    RAC_MODE="RAC"
+  elif [[ "$CLUSTER_DATABASE_ENABLED" == "FALSE" ]]; then
+    RAC_MODE="STANDALONE"
+  elif value_known_number "$RAC_INSTANCE_COUNT" && number_ge "$RAC_INSTANCE_COUNT" 2; then
+    RAC_MODE="RAC"
+  elif [[ -n "$DETECTED_PMON_SIDS" && "$DETECTED_PMON_SIDS" == *,* ]]; then
+    RAC_MODE="RAC"
+  fi
+
+  set_metric_from_query CDB_ENABLED "select cdb from v\$database;" || true
+  set_metric_from_query CURRENT_CONTAINER_NAME "select sys_context('USERENV', 'CON_NAME') from dual;" || true
+  set_metric_from_query PDB_COUNT "select count(*) from v\$pdbs;" || true
+
+  if set_metric_from_query DATABASE_ROLE "select database_role from v\$database;"; then
+    DG_VIEW_AVAILABLE="Y"
+  fi
+  set_metric_from_query OPEN_MODE "select open_mode from v\$database;" || true
+  set_metric_from_query PROTECTION_MODE "select protection_mode from v\$database;" || true
+  set_metric_from_query SWITCHOVER_STATUS "select switchover_status from v\$database;" || true
+  set_metric_from_query FORCE_LOGGING "select force_logging from v\$database;" || true
+  set_metric_from_query ARCHIVE_LOG_MODE "select log_mode from v\$database;" || true
+  set_metric_from_query TRANSPORT_LAG "select max(value) from v\$dataguard_stats where name = 'transport lag';" || true
+  set_metric_from_query APPLY_LAG "select max(value) from v\$dataguard_stats where name = 'apply lag';" || true
+  set_metric_from_query ARCHIVE_DEST_ERROR_COUNT "select count(*) from v\$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR');" || true
+  if ! set_metric_from_query ARCHIVE_DEST_ERRORS "select listagg(dest_id || ':' || error, '; ') within group(order by dest_id) from v\$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR');"; then
+    if [[ "$ARCHIVE_DEST_ERROR_COUNT" == "0" ]]; then
+      ARCHIVE_DEST_ERRORS="None"
+    fi
+  fi
+  if ! set_metric_from_query MANAGED_RECOVERY_STATUS "select listagg(process || ':' || status, '; ') within group(order by process) from v\$managed_standby where process like 'MRP%';"; then
+    if [[ "$DATABASE_ROLE" == "PHYSICAL STANDBY" ]]; then
+      MANAGED_RECOVERY_STATUS="Unavailable"
+    elif [[ "$DATABASE_ROLE" == "LOGICAL STANDBY" ]]; then
+      MANAGED_RECOVERY_STATUS="Logical standby - check SQL Apply separately"
+    else
+      MANAGED_RECOVERY_STATUS="Not applicable"
+    fi
+  fi
+
+  set_metric_from_query DB_INVALID_OBJECTS "select count(*) from dba_objects where status <> 'VALID';" || true
+  set_metric_from_query DB_FAILED_JOBS_24H "select count(*) from dba_scheduler_job_run_details where log_date >= systimestamp - interval '1' day and status not in ('SUCCEEDED', 'RUNNING');" || true
+  set_metric_from_query DB_SESSIONS_PCT "select round((current_utilization / to_number(limit_value)) * 100, 2) from v\$resource_limit where resource_name = 'sessions' and regexp_like(limit_value, '^[0-9]+$');" || true
+  set_metric_from_query DB_PROCESSES_PCT "select round((current_utilization / to_number(limit_value)) * 100, 2) from v\$resource_limit where resource_name = 'processes' and regexp_like(limit_value, '^[0-9]+$');" || true
+  set_metric_from_query DB_TEMP_PCT "select round(max((bytes_used / nullif(bytes_used + bytes_free, 0)) * 100), 2) from v\$temp_space_header;" || true
+  set_metric_from_query DB_FRA_PCT "select round((space_used / nullif(space_limit, 0)) * 100, 2) from v\$recovery_file_dest;" || true
+  set_metric_from_query DB_FRA_DEST "select max(name) from v\$recovery_file_dest;" || true
+  set_metric_from_query ALERT_LOG_LOCATION "select max(value) from v\$diag_info where name = 'Diag Alert';" || true
+
+  TRANSPORT_LAG_MINUTES="$(lag_to_minutes "$TRANSPORT_LAG")"
+  APPLY_LAG_MINUTES="$(lag_to_minutes "$APPLY_LAG")"
+}
+
 evaluate_rac_status() {
   RAC_STATUS_SUMMARY="GREEN"
   RAC_DETAIL_MESSAGE="Database is standalone."
 
   if [[ "$RAC_MODE" == "RAC" ]]; then
     if [[ "$PDB_COUNT" != "N/A" && "$PDB_COUNT" != "0" ]]; then
-      RAC_DETAIL_MESSAGE="RAC is enabled. Multitenant appears to be in use with $PDB_COUNT PDB(s)."
+      RAC_DETAIL_MESSAGE="RAC detected. Multitenant appears active with $PDB_COUNT PDB(s)."
     else
-      RAC_DETAIL_MESSAGE="RAC is enabled and cluster views were checked."
+      RAC_DETAIL_MESSAGE="RAC detected and cluster-wide views were checked."
     fi
 
     if [[ "$RAC_VIEW_AVAILABLE" != "Y" ]]; then
       RAC_STATUS_SUMMARY="AMBER"
-      RAC_DETAIL_MESSAGE="RAC appears enabled but gv\$instance was unavailable."
+      RAC_DETAIL_MESSAGE="RAC detected, but gv\$instance could not be read."
       set_status "AMBER"
     elif [[ "$RAC_INSTANCE_ISSUE" == "Y" ]]; then
       RAC_STATUS_SUMMARY="RED"
@@ -540,7 +520,7 @@ evaluate_dg_status() {
   if [[ "$DATABASE_ROLE" == "PHYSICAL STANDBY" || "$DATABASE_ROLE" == "LOGICAL STANDBY" ]]; then
     if [[ "$DATABASE_ROLE" == "PHYSICAL STANDBY" ]]; then
       case "$MANAGED_RECOVERY_STATUS" in
-        *APPLYING_LOG*|*WAIT_FOR_LOG*|*IDLE*) : ;;
+        *APPLYING_LOG*|*WAIT_FOR_LOG*|*IDLE*) ;;
         *Unavailable*)
           if [[ "$DG_STATUS_SUMMARY" != "RED" ]]; then
             DG_STATUS_SUMMARY="AMBER"
@@ -700,6 +680,7 @@ show_rac_summary() {
   print_kv "Current host name" "$CURRENT_HOST_NAME"
   print_kv "Current instance status" "$CURRENT_INSTANCE_STATUS"
   print_kv "Current startup time" "$CURRENT_STARTUP_TIME"
+  print_kv "gv\$instance count" "$RAC_INSTANCE_COUNT"
   print_kv "All instances from gv\$instance" "$ALL_INSTANCES_SUMMARY"
 
   if [[ "$RAC_VIEW_AVAILABLE" != "Y" ]]; then
@@ -725,94 +706,6 @@ show_dataguard_summary() {
     echo
     echo "Some Data Guard views were unavailable. The script handled this safely and continued."
   fi
-}
-
-run_sqlplus_report_block() {
-  local title="$1"
-  local sql_text="$2"
-
-  print_subheader "$title"
-  ORACLE_SID="$ACTIVE_ORACLE_SID" "$SQLPLUS_BIN" -s / as sysdba <<SQL
-set pagesize 200 linesize 220 trimspool on feedback off verify off heading on echo off timing off
-$sql_text
-exit
-SQL
-}
-
-show_database_checks() {
-  print_header "DATABASE CHECKS"
-
-  if [[ -z "$SQLPLUS_BIN" ]]; then
-    echo "sqlplus is not available."
-    echo "Database checks were skipped."
-    return
-  fi
-
-  print_kv "sqlplus path" "$SQLPLUS_BIN"
-
-  if [[ -z "$ACTIVE_ORACLE_HOME" || -z "$ACTIVE_ORACLE_SID" ]]; then
-    echo
-    show_missing_env_guidance
-    echo
-    echo "Database checks were skipped."
-    return
-  fi
-
-  echo
-  print_kv "Using ORACLE_HOME" "$ACTIVE_ORACLE_HOME"
-  print_kv "Using ORACLE_SID" "$ACTIVE_ORACLE_SID"
-  print_kv "Invalid objects count" "$DB_INVALID_OBJECTS"
-  print_kv "Failed jobs last 24h" "$DB_FAILED_JOBS_24H"
-  print_kv "Sessions usage percent" "$DB_SESSIONS_PCT"
-  print_kv "Processes usage percent" "$DB_PROCESSES_PCT"
-  print_kv "Temp usage percent" "$DB_TEMP_PCT"
-  print_kv "FRA usage percent" "$DB_FRA_PCT"
-  print_kv "FRA destination" "$DB_FRA_DEST"
-  print_kv "Alert log location" "$ALERT_LOG_LOCATION"
-
-  echo
-  echo "Running read-only detailed database queries..."
-
-  run_sqlplus_report_block "DATABASE INSTANCE STATUS" "col instance_name format a18
-col host_name format a30
-col version format a18
-col status format a12
-col open_mode format a22
-col database_role format a20
-col startup_time format a20
-select i.instance_name, i.host_name, i.version, i.status, d.open_mode, d.database_role, to_char(i.startup_time, 'YYYY-MM-DD HH24:MI:SS') as startup_time from v\$instance i cross join v\$database d;"
-
-  run_sqlplus_report_block "INVALID OBJECTS COUNT" "select count(*) as invalid_objects from dba_objects where status <> 'VALID';"
-
-  run_sqlplus_report_block "FAILED SCHEDULER JOBS IN LAST 24 HOURS" "select count(*) as failed_scheduler_jobs_24h from dba_scheduler_job_run_details where log_date >= systimestamp - interval '1' day and status not in ('SUCCEEDED', 'RUNNING');"
-
-  run_sqlplus_report_block "SESSIONS AND PROCESSES USAGE" "col resource_name format a15
-col current_utilization format 99999999
-col max_utilization format 99999999
-col limit_value format a15
-col pct_used format 990.00
-select resource_name, current_utilization, max_utilization, limit_value, case when regexp_like(limit_value, '^[0-9]+$') and to_number(limit_value) > 0 then round((current_utilization / to_number(limit_value)) * 100, 2) else null end as pct_used from v\$resource_limit where resource_name in ('sessions', 'processes') order by resource_name;"
-
-  run_sqlplus_report_block "TEMP TABLESPACE USAGE" "col tablespace_name format a30
-col total_mb format 99999990.00
-col used_mb format 99999990.00
-col free_mb format 99999990.00
-col pct_used format 990.00
-select tablespace_name, round((bytes_used + bytes_free) / 1024 / 1024, 2) as total_mb, round(bytes_used / 1024 / 1024, 2) as used_mb, round(bytes_free / 1024 / 1024, 2) as free_mb, round((bytes_used / nullif(bytes_used + bytes_free, 0)) * 100, 2) as pct_used from v\$temp_space_header order by pct_used desc, tablespace_name;"
-
-  run_sqlplus_report_block "TABLESPACE USAGE SUMMARY" "col tablespace_name format a30
-col total_mb format 99999990.00
-col used_mb format 99999990.00
-col free_mb format 99999990.00
-col pct_used format 990.00
-with data_files as (select tablespace_name, sum(bytes) / 1024 / 1024 as total_mb from dba_data_files group by tablespace_name), free_space as (select tablespace_name, sum(bytes) / 1024 / 1024 as free_mb from dba_free_space group by tablespace_name) select df.tablespace_name, round(df.total_mb, 2) as total_mb, round(df.total_mb - nvl(fs.free_mb, 0), 2) as used_mb, round(nvl(fs.free_mb, 0), 2) as free_mb, round(((df.total_mb - nvl(fs.free_mb, 0)) / df.total_mb) * 100, 2) as pct_used from data_files df left join free_space fs on df.tablespace_name = fs.tablespace_name order by pct_used desc, df.tablespace_name;"
-
-  run_sqlplus_report_block "ARCHIVE DESTINATION AND FRA USAGE" "col name format a60
-col fra_pct_used format 990.00
-select name, round(space_limit / 1024 / 1024 / 1024, 2) as space_limit_gb, round(space_used / 1024 / 1024 / 1024, 2) as space_used_gb, round((space_used / nullif(space_limit, 0)) * 100, 2) as fra_pct_used, number_of_files from v\$recovery_file_dest;"
-
-  run_sqlplus_report_block "ALERT LOG LOCATION" "col value format a110
-select name, value from v\$diag_info where name in ('Diag Trace', 'Diag Alert', 'Default Trace File');"
 }
 
 show_system_details() {
@@ -852,6 +745,61 @@ show_pmon_section() {
 show_listener_section() {
   print_header "LISTENER STATUS"
   show_listener_status
+}
+
+show_database_checks() {
+  print_header "DATABASE CHECKS"
+
+  if [[ -z "$SQLPLUS_BIN" ]]; then
+    echo "sqlplus is not available."
+    echo "Database checks were skipped."
+    return
+  fi
+
+  print_kv "sqlplus path" "$SQLPLUS_BIN"
+
+  if [[ -z "$ACTIVE_ORACLE_HOME" || -z "$ACTIVE_ORACLE_SID" ]]; then
+    echo
+    show_missing_env_guidance
+    echo
+    echo "Database checks were skipped."
+    return
+  fi
+
+  echo
+  print_kv "Using ORACLE_HOME" "$ACTIVE_ORACLE_HOME"
+  print_kv "Using ORACLE_SID" "$ACTIVE_ORACLE_SID"
+  print_kv "Invalid objects count" "$DB_INVALID_OBJECTS"
+  print_kv "Failed jobs last 24h" "$DB_FAILED_JOBS_24H"
+  print_kv "Sessions usage percent" "$DB_SESSIONS_PCT"
+  print_kv "Processes usage percent" "$DB_PROCESSES_PCT"
+  print_kv "Temp usage percent" "$DB_TEMP_PCT"
+  print_kv "FRA usage percent" "$DB_FRA_PCT"
+  print_kv "FRA destination" "$DB_FRA_DEST"
+  print_kv "Alert log location" "$ALERT_LOG_LOCATION"
+
+  echo
+  echo "Running read-only detailed database queries..."
+
+  sqlplus_report_block "DATABASE INSTANCE STATUS" "select i.instance_name, i.host_name, i.version, i.status, d.open_mode, d.database_role, to_char(i.startup_time, 'YYYY-MM-DD HH24:MI:SS') as startup_time from v\$instance i cross join v\$database d;"
+
+  sqlplus_report_block "RAC INSTANCE STATUS" "select inst_id, instance_name, host_name, status, to_char(startup_time, 'YYYY-MM-DD HH24:MI:SS') as startup_time from gv\$instance order by inst_id;"
+
+  sqlplus_report_block "MULTITENANT SUMMARY" "select cdb, sys_context('USERENV', 'CON_NAME') as current_container from v\$database cross join dual; select con_id, name, open_mode from v\$pdbs order by con_id;"
+
+  sqlplus_report_block "INVALID OBJECTS COUNT" "select count(*) as invalid_objects from dba_objects where status <> 'VALID';"
+
+  sqlplus_report_block "FAILED SCHEDULER JOBS IN LAST 24 HOURS" "select count(*) as failed_scheduler_jobs_24h from dba_scheduler_job_run_details where log_date >= systimestamp - interval '1' day and status not in ('SUCCEEDED', 'RUNNING');"
+
+  sqlplus_report_block "SESSIONS AND PROCESSES USAGE" "select resource_name, current_utilization, max_utilization, limit_value, case when regexp_like(limit_value, '^[0-9]+$') and to_number(limit_value) > 0 then round((current_utilization / to_number(limit_value)) * 100, 2) else null end as pct_used from v\$resource_limit where resource_name in ('sessions', 'processes') order by resource_name;"
+
+  sqlplus_report_block "TEMP TABLESPACE USAGE" "select tablespace_name, round((bytes_used + bytes_free) / 1024 / 1024, 2) as total_mb, round(bytes_used / 1024 / 1024, 2) as used_mb, round(bytes_free / 1024 / 1024, 2) as free_mb, round((bytes_used / nullif(bytes_used + bytes_free, 0)) * 100, 2) as pct_used from v\$temp_space_header order by tablespace_name;"
+
+  sqlplus_report_block "TABLESPACE USAGE SUMMARY" "with data_files as (select tablespace_name, sum(bytes) / 1024 / 1024 as total_mb from dba_data_files group by tablespace_name), free_space as (select tablespace_name, sum(bytes) / 1024 / 1024 as free_mb from dba_free_space group by tablespace_name) select df.tablespace_name, round(df.total_mb, 2) as total_mb, round(df.total_mb - nvl(fs.free_mb, 0), 2) as used_mb, round(nvl(fs.free_mb, 0), 2) as free_mb, round(((df.total_mb - nvl(fs.free_mb, 0)) / df.total_mb) * 100, 2) as pct_used from data_files df left join free_space fs on df.tablespace_name = fs.tablespace_name order by pct_used desc, df.tablespace_name;"
+
+  sqlplus_report_block "ARCHIVE DESTINATION AND FRA USAGE" "select name, round(space_limit / 1024 / 1024 / 1024, 2) as space_limit_gb, round(space_used / 1024 / 1024 / 1024, 2) as space_used_gb, round((space_used / nullif(space_limit, 0)) * 100, 2) as fra_pct_used, number_of_files from v\$recovery_file_dest; select dest_id, status, destination, error from v\$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR') order by dest_id;"
+
+  sqlplus_report_block "ALERT LOG LOCATION" "select name, value from v\$diag_info where name in ('Diag Trace', 'Diag Alert', 'Default Trace File');"
 }
 
 generate_report() {
