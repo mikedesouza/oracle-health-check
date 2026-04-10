@@ -1,13 +1,72 @@
 #!/usr/bin/env bash
 
-# This script is a safe, read-only Oracle health check.
-# It collects operating system details and, when possible, Oracle database details.
-# It does not change database settings, files, or server configuration.
+# This script is a safe, read-only Oracle health check for Linux Oracle servers.
+# It reads operating system and Oracle information and writes a timestamped report.
+# It does not change database settings, listener settings, or Oracle files.
 
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
+OUTPUT_DIR="$SCRIPT_DIR"
+REPORT_FILE=""
+SILENT_MODE="false"
+DETECTED_PMON_SIDS=""
+ACTIVE_ORACLE_SID="${ORACLE_SID:-}"
+ACTIVE_ORACLE_HOME="${ORACLE_HOME:-}"
+SQLPLUS_BIN=""
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -s|--silent)
+        SILENT_MODE="true"
+        shift
+        ;;
+      -o|--output-dir)
+        if [[ $# -lt 2 ]]; then
+          echo "Missing value for $1"
+          exit 1
+        fi
+        OUTPUT_DIR="$2"
+        shift 2
+        ;;
+      -h|--help)
+        show_help
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        show_help
+        exit 1
+        ;;
+    esac
+  done
+}
+
+show_help() {
+  cat <<'HELP'
+Usage:
+  ./oracle_health_check.sh [options]
+
+Options:
+  -s, --silent             Write the report file only, with no screen output
+  -o, --output-dir <dir>   Directory where the timestamped report will be saved
+  -h, --help               Show this help message
+HELP
+}
+
+init_report_output() {
+  mkdir -p "$OUTPUT_DIR"
+  REPORT_FILE="$OUTPUT_DIR/oracle_health_check_${TIMESTAMP}.log"
+}
+
 print_line() {
-  printf '%*s\n' "${1:-80}" '' | tr ' ' '-'
+  printf '%*s\n' "${1:-80}" '' | tr ' ' '='
+}
+
+print_subline() {
+  printf '%*s\n' "${1:-60}" '' | tr ' ' '-'
 }
 
 print_header() {
@@ -17,12 +76,34 @@ print_header() {
   print_line 80
 }
 
+print_subheader() {
+  echo
+  echo "$1"
+  print_subline 60
+}
+
 print_kv() {
   printf '%-30s : %s\n' "$1" "$2"
 }
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+memory_source_available() {
+  command_exists free || [[ -r /proc/meminfo ]]
+}
+
+ps_source_available() {
+  command_exists ps
+}
+
+database_check_ready() {
+  [[ -n "$SQLPLUS_BIN" && -n "$ACTIVE_ORACLE_HOME" && -n "$ACTIVE_ORACLE_SID" ]]
+}
+
+print_status_line() {
+  printf '%-30s : %-8s %s\n' "$1" "$2" "$3"
 }
 
 run_if_exists() {
@@ -34,6 +115,14 @@ run_if_exists() {
   else
     echo "Command '$cmd' is not available."
   fi
+}
+
+safe_hostname() {
+  hostname 2>/dev/null || echo "Unknown"
+}
+
+safe_datetime() {
+  date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date
 }
 
 detect_os_uptime() {
@@ -81,15 +170,38 @@ show_top_cpu_processes() {
   fi
 }
 
+detect_pmon_sids() {
+  local pmon_output
+
+  if ! command_exists ps; then
+    return
+  fi
+
+  pmon_output="$(ps -ef 2>&1 | grep '[o]ra_pmon_' || true)"
+
+  if [[ "$pmon_output" == *"Operation not permitted"* ]]; then
+    return
+  fi
+
+  DETECTED_PMON_SIDS="$(printf '%s\n' "$pmon_output" | awk '
+    /ora_pmon_/ {
+      split($0, a, "ora_pmon_")
+      if (a[2] != "") print a[2]
+    }
+  ' | awk '{print $1}' | sort -u | paste -sd, -)"
+}
+
 show_pmon_processes() {
   if command_exists ps; then
     local output
-    output="$(ps -ef 2>&1 | grep [p]mon || true)"
+    output="$(ps -ef 2>&1 | grep '[o]ra_pmon_' || true)"
     if [[ "$output" == *"Operation not permitted"* ]]; then
       echo "Unable to read process list for PMON search."
       echo "$output"
     elif [[ -n "$output" ]]; then
       echo "$output"
+      echo
+      print_kv "Detected PMON SIDs" "${DETECTED_PMON_SIDS:-None detected}"
     else
       echo "No Oracle PMON processes were found."
     fi
@@ -107,54 +219,129 @@ show_listener_status() {
   fi
 }
 
-oracle_env_ready() {
-  if [[ -z "${ORACLE_HOME:-}" ]]; then
-    return 1
-  fi
-
-  if [[ -z "${ORACLE_SID:-}" ]]; then
-    return 1
-  fi
-
-  return 0
-}
-
-show_oracle_env_help() {
-  echo "Oracle environment variables are missing or incomplete."
-  echo "This script needs at least these variables for database checks:"
-  echo "  ORACLE_HOME"
-  echo "  ORACLE_SID"
-  echo
-  echo "Example:"
-  echo "  export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1"
-  echo "  export ORACLE_SID=ORCL"
-  echo "  export PATH=\$ORACLE_HOME/bin:\$PATH"
-  echo
-  echo "OS checks still ran, but database checks were skipped."
-}
-
 get_sqlplus_path() {
   if command_exists sqlplus; then
     command -v sqlplus
-  elif [[ -n "${ORACLE_HOME:-}" && -x "${ORACLE_HOME}/bin/sqlplus" ]]; then
-    echo "${ORACLE_HOME}/bin/sqlplus"
+  elif [[ -n "$ACTIVE_ORACLE_HOME" && -x "$ACTIVE_ORACLE_HOME/bin/sqlplus" ]]; then
+    echo "$ACTIVE_ORACLE_HOME/bin/sqlplus"
   else
     echo ""
   fi
 }
 
+resolve_oracle_environment() {
+  detect_pmon_sids
+
+  if [[ -z "$ACTIVE_ORACLE_SID" && -n "$DETECTED_PMON_SIDS" ]]; then
+    if [[ "$DETECTED_PMON_SIDS" == *,* ]]; then
+      ACTIVE_ORACLE_SID=""
+    else
+      ACTIVE_ORACLE_SID="$DETECTED_PMON_SIDS"
+    fi
+  fi
+
+  SQLPLUS_BIN="$(get_sqlplus_path)"
+
+  if [[ -z "$ACTIVE_ORACLE_HOME" && -n "$SQLPLUS_BIN" ]]; then
+    ACTIVE_ORACLE_HOME="$(cd "$(dirname "$SQLPLUS_BIN")/.." 2>/dev/null && pwd)"
+  fi
+}
+
+show_oracle_environment_summary() {
+  print_header "ORACLE ENVIRONMENT"
+  print_kv "Report file" "$REPORT_FILE"
+  print_kv "ORACLE_HOME" "${ORACLE_HOME:-Not set}"
+  print_kv "ORACLE_SID" "${ORACLE_SID:-Not set}"
+  print_kv "Resolved ORACLE_HOME" "${ACTIVE_ORACLE_HOME:-Not resolved}"
+  print_kv "Resolved ORACLE_SID" "${ACTIVE_ORACLE_SID:-Not resolved}"
+  print_kv "Detected PMON SIDs" "${DETECTED_PMON_SIDS:-None detected}"
+  print_kv "sqlplus available" "$( [[ -n "$SQLPLUS_BIN" ]] && echo Yes || echo No )"
+  print_kv "lsnrctl available" "$( command_exists lsnrctl && echo Yes || echo No )"
+}
+
+show_executive_summary() {
+  print_header "EXECUTIVE SUMMARY"
+
+  print_status_line "System details" "OK" "Hostname and date/time collected."
+
+  if command_exists df; then
+    print_status_line "Filesystem usage" "OK" "Filesystem command is available."
+  else
+    print_status_line "Filesystem usage" "WARNING" "Filesystem command is not available."
+  fi
+
+  if memory_source_available; then
+    print_status_line "Memory usage" "OK" "Memory source is available."
+  else
+    print_status_line "Memory usage" "WARNING" "Memory source is not available."
+  fi
+
+  if ps_source_available; then
+    print_status_line "Top CPU processes" "OK" "Process list command is available."
+  else
+    print_status_line "Top CPU processes" "WARNING" "Process list command is not available."
+  fi
+
+  if [[ -n "$DETECTED_PMON_SIDS" ]]; then
+    print_status_line "Oracle PMON" "OK" "Detected PMON SIDs: $DETECTED_PMON_SIDS"
+  elif ps_source_available; then
+    print_status_line "Oracle PMON" "WARNING" "No PMON processes were detected."
+  else
+    print_status_line "Oracle PMON" "SKIPPED" "Process list command is not available."
+  fi
+
+  if command_exists lsnrctl; then
+    print_status_line "Listener status" "OK" "lsnrctl is available."
+  else
+    print_status_line "Listener status" "SKIPPED" "lsnrctl is not available."
+  fi
+
+  if [[ -z "$SQLPLUS_BIN" ]]; then
+    print_status_line "Database checks" "SKIPPED" "sqlplus is not available."
+  elif database_check_ready; then
+    print_status_line "Database checks" "OK" "sqlplus and Oracle environment are ready."
+  elif [[ -n "$DETECTED_PMON_SIDS" && "$DETECTED_PMON_SIDS" == *,* && -z "${ORACLE_SID:-}" ]]; then
+    print_status_line "Database checks" "SKIPPED" "Multiple PMON SIDs found. Set ORACLE_SID first."
+  else
+    print_status_line "Database checks" "SKIPPED" "ORACLE_HOME or ORACLE_SID is not fully resolved."
+  fi
+}
+
+show_missing_env_guidance() {
+  echo "Oracle environment variables are missing or incomplete for database checks."
+  echo
+  if [[ -z "${ORACLE_HOME:-}" ]]; then
+    echo "- ORACLE_HOME is not set."
+  fi
+
+  if [[ -z "${ORACLE_SID:-}" ]]; then
+    if [[ -n "$ACTIVE_ORACLE_SID" ]]; then
+      echo "- ORACLE_SID was not set, so the script selected: $ACTIVE_ORACLE_SID"
+    elif [[ -n "$DETECTED_PMON_SIDS" && "$DETECTED_PMON_SIDS" == *,* ]]; then
+      echo "- ORACLE_SID is not set and multiple PMON processes were found."
+      echo "  Set ORACLE_SID to the instance you want to check."
+    else
+      echo "- ORACLE_SID is not set."
+    fi
+  fi
+
+  echo
+  echo "Example environment setup:"
+  echo "  export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1"
+  echo "  export ORACLE_SID=ORCL"
+  echo "  export PATH=\$ORACLE_HOME/bin:\$PATH"
+}
+
 run_sqlplus_health_query() {
   local sqlplus_bin="$1"
+  local oracle_sid="$2"
 
-  "$sqlplus_bin" -s / as sysdba <<'SQL'
+  ORACLE_SID="$oracle_sid" "$sqlplus_bin" -s / as sysdba <<'SQL'
 set pagesize 200 linesize 200 trimspool on feedback off verify off heading on echo off timing off
 
 prompt
-prompt DATABASE HEALTH
-prompt ----------------
-
-prompt
-prompt Instance status, open mode, role, startup time
+prompt DATABASE INSTANCE STATUS
+prompt ------------------------
 col instance_name format a18
 col host_name format a30
 col version format a18
@@ -174,14 +361,16 @@ from v$instance i
 cross join v$database d;
 
 prompt
-prompt Archive log mode
+prompt ARCHIVE LOG MODE
+prompt ----------------
 col log_mode format a15
 col force_logging format a15
 col flashback_on format a15
 select log_mode, force_logging, flashback_on from v$database;
 
 prompt
-prompt FRA usage
+prompt FRA USAGE
+prompt ---------
 col name format a45
 col space_limit_gb format 9999990.00
 col space_used_gb format 9999990.00
@@ -195,7 +384,8 @@ select
 from v$recovery_file_dest;
 
 prompt
-prompt Tablespace usage summary
+prompt TABLESPACE USAGE SUMMARY
+prompt ------------------------
 col tablespace_name format a30
 col total_mb format 99999990.00
 col used_mb format 99999990.00
@@ -222,7 +412,8 @@ left join free_space fs on df.tablespace_name = fs.tablespace_name
 order by pct_used desc, df.tablespace_name;
 
 prompt
-prompt Alert log location
+prompt ALERT LOG LOCATION
+prompt ------------------
 col value format a100
 select name, value
 from v$diag_info
@@ -233,70 +424,102 @@ SQL
 }
 
 show_database_checks() {
-  local sqlplus_bin
-  sqlplus_bin="$(get_sqlplus_path)"
+  print_header "DATABASE CHECKS"
 
-  print_header "ORACLE ENVIRONMENT"
-  print_kv "ORACLE_HOME" "${ORACLE_HOME:-Not set}"
-  print_kv "ORACLE_SID" "${ORACLE_SID:-Not set}"
-  print_kv "PATH has sqlplus" "$(command_exists sqlplus && echo "Yes" || echo "No")"
-
-  echo
-  if [[ -z "$sqlplus_bin" ]]; then
+  if [[ -z "$SQLPLUS_BIN" ]]; then
     echo "sqlplus is not available."
-    echo "Database health checks were skipped."
+    echo "Database checks were skipped."
     return
   fi
 
-  print_kv "sqlplus path" "$sqlplus_bin"
+  print_kv "sqlplus path" "$SQLPLUS_BIN"
 
-  if ! oracle_env_ready; then
+  if [[ -z "$ACTIVE_ORACLE_HOME" || -z "$ACTIVE_ORACLE_SID" ]]; then
     echo
-    show_oracle_env_help
+    show_missing_env_guidance
+    echo
+    echo "Database checks were skipped."
     return
   fi
 
   echo
-  echo "Running read-only database checks with sqlplus..."
+  print_kv "Using ORACLE_HOME" "$ACTIVE_ORACLE_HOME"
+  print_kv "Using ORACLE_SID" "$ACTIVE_ORACLE_SID"
   echo
-  run_sqlplus_health_query "$sqlplus_bin"
+  echo "Running read-only database queries..."
+  echo
+  run_sqlplus_health_query "$SQLPLUS_BIN" "$ACTIVE_ORACLE_SID"
 }
 
-main() {
-  print_header "ORACLE SERVER HEALTH CHECK"
-  echo "This script is read-only. It reports health information and does not make changes."
-
+show_system_details() {
   print_header "SYSTEM DETAILS"
-  print_kv "Hostname" "$(hostname 2>/dev/null || echo "Unknown")"
-  print_kv "Date/Time" "$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date)"
+  print_kv "Hostname" "$(safe_hostname)"
+  print_kv "Date/Time" "$(safe_datetime)"
+  print_kv "Report file" "$REPORT_FILE"
 
-  echo
-  echo "OS Uptime"
-  echo "---------"
+  print_subheader "OS UPTIME"
   detect_os_uptime
+}
 
+show_filesystem_usage() {
   print_header "FILESYSTEM USAGE"
   run_if_exists df -hP
+}
 
+show_memory_section() {
   print_header "MEMORY USAGE"
   show_memory_usage
+}
 
+show_cpu_section() {
   print_header "TOP CPU PROCESSES"
   show_top_cpu_processes
+}
 
+show_pmon_section() {
   print_header "ORACLE PMON PROCESSES"
   show_pmon_processes
+}
 
+show_listener_section() {
   print_header "LISTENER STATUS"
   show_listener_status
+}
 
+generate_report() {
+  print_header "ORACLE SERVER HEALTH CHECK"
+  echo "This script is read-only."
+  echo "It reads health information and writes a report file."
+  echo "It does not make Oracle or OS configuration changes."
+
+  show_executive_summary
+  show_system_details
+  show_filesystem_usage
+  show_memory_section
+  show_cpu_section
+  show_pmon_section
+  show_listener_section
+  show_oracle_environment_summary
   show_database_checks
 
   echo
   print_line 80
   echo "Health check completed."
-  echo "No changes were made to the server or database."
+  echo "Report saved to: $REPORT_FILE"
+  echo "No Oracle or database changes were made."
   print_line 80
+}
+
+main() {
+  parse_args "$@"
+  init_report_output
+  resolve_oracle_environment
+
+  if [[ "$SILENT_MODE" == "true" ]]; then
+    generate_report >"$REPORT_FILE" 2>&1
+  else
+    generate_report 2>&1 | tee "$REPORT_FILE"
+  fi
 }
 
 main "$@"

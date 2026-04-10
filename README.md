@@ -1,26 +1,36 @@
 # Oracle Health Check Tool
 
-This project is a beginner-friendly, read-only Oracle health check tool for Linux Oracle database servers.
+This project is a beginner-friendly, read-only Oracle health check tool for real Linux Oracle database servers.
 
 The main script is:
 
 - `oracle_health_check.sh`
 
-It collects server details and Oracle database details when the Oracle environment and tools are available.
+It collects Linux server details and Oracle database details when Oracle tools and environment settings are available.
 
 ## Safety
 
 This script is safe and read-only.
 
-It does **not**:
+It does not:
 
 - start or stop Oracle
 - change database settings
-- create or delete files
-- run DDL or DML changes
+- create database objects
 - modify listener configuration
+- delete or update server files
 
-It only reads information and prints a report.
+It only reads information and writes a plain text report file.
+
+## New Features In This Version
+
+- clear section headings
+- clean colorless output
+- graceful handling when `ORACLE_HOME` or `ORACLE_SID` is missing
+- support for multiple PMON processes
+- automatic timestamped report files
+- optional silent mode that only writes the report file
+- a short executive summary with `OK`, `WARNING`, and `SKIPPED`
 
 ## What It Checks
 
@@ -48,20 +58,20 @@ The script displays:
 - Linux server
 - Bash shell
 - Oracle database server or Oracle client tools if you want database checks
-- Access to run the script on the server
+- access to run the script on the server
 
-For full Oracle database checks, it is best to run the script as the Oracle software owner, often `oracle`.
+For the Oracle database section, it is best to run the script as the Oracle software owner, often `oracle`.
 
 ## Files
 
-- `oracle_health_check.sh` - the main health check script
+- `oracle_health_check.sh` - main health check script
 - `README.md` - instructions and examples
 
 ## Exact Run Steps
 
-1. Copy the project folder to your Linux Oracle server if it is not already there.
+1. Copy this folder to your Linux Oracle server.
 2. Open a terminal session on the Linux server.
-3. Go to the project folder:
+3. Go to the folder:
 
 ```bash
 cd /path/to/oracle-health-check
@@ -79,9 +89,51 @@ chmod +x oracle_health_check.sh
 ./oracle_health_check.sh
 ```
 
+6. The script will print the report and also save a timestamped report file in the same folder.
+
+Near the top of the report, you will also see a short summary section that quickly shows the status of major areas:
+
+- `OK`
+- `WARNING`
+- `SKIPPED`
+
+Example report file name:
+
+```text
+oracle_health_check_20260410_143000.log
+```
+
+## Silent Mode
+
+If you want the script to only write the report file and not print to the screen, use:
+
+```bash
+./oracle_health_check.sh --silent
+```
+
+Short option:
+
+```bash
+./oracle_health_check.sh -s
+```
+
+## Custom Output Directory
+
+If you want the report written to a different directory, use:
+
+```bash
+./oracle_health_check.sh --output-dir /tmp/oracle_reports
+```
+
+You can combine both options:
+
+```bash
+./oracle_health_check.sh --silent --output-dir /tmp/oracle_reports
+```
+
 ## Best Practice For Oracle Checks
 
-If you want Oracle database results, run it with the Oracle environment loaded.
+If you want full Oracle database results, load the Oracle environment first.
 
 Example:
 
@@ -100,55 +152,48 @@ cd /path/to/oracle-health-check
 ./oracle_health_check.sh
 ```
 
-## Example Output Areas
+## Handling Missing Oracle Variables
 
-You will see sections like:
+The script handles missing Oracle variables gracefully.
 
-- `SYSTEM DETAILS`
-- `FILESYSTEM USAGE`
-- `MEMORY USAGE`
-- `TOP CPU PROCESSES`
-- `ORACLE PMON PROCESSES`
-- `LISTENER STATUS`
-- `ORACLE ENVIRONMENT`
-- `DATABASE HEALTH`
+If `ORACLE_HOME` is missing:
 
-## If sqlplus Is Not Available
+- the script still runs OS checks
+- it checks whether `sqlplus` is already on `PATH`
+- if needed, it explains that database checks were skipped
 
-The script checks whether `sqlplus` exists.
+If `ORACLE_SID` is missing:
 
-If `sqlplus` is not found, it clearly says that:
+- the script still runs OS checks
+- if exactly one PMON process is found, it uses that SID automatically
+- if multiple PMON processes are found, it tells you to set `ORACLE_SID` explicitly
 
-- `sqlplus is not available`
-- database checks were skipped
+## Multiple PMON Support
 
-OS checks will still run.
+The script looks for multiple `ora_pmon_<SID>` processes.
 
-## If Oracle Environment Variables Are Missing
+It shows:
 
-The script checks for:
+- the PMON process list
+- the detected SID names
 
-- `ORACLE_HOME`
-- `ORACLE_SID`
-
-If they are missing, the script clearly explains that database checks were skipped and shows an example of how to set them.
-
-## Notes
-
-- `lsnrctl` is optional. If it does not exist, the script skips listener checks.
-- FRA information depends on Oracle configuration and privileges.
-- Tablespace and diagnostic queries require access to Oracle dynamic and DBA views.
-- If you do not have the needed privileges, Oracle may return an error for some database sections while the rest of the report still prints.
+This is helpful on Linux servers that host more than one Oracle instance.
 
 ## Example Commands
 
-Run basic OS and Oracle checks:
+Run standard report:
 
 ```bash
 ./oracle_health_check.sh
 ```
 
-Run after setting Oracle variables:
+Run silently and save the report only:
+
+```bash
+./oracle_health_check.sh --silent
+```
+
+Run with Oracle environment set:
 
 ```bash
 export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
@@ -157,33 +202,50 @@ export PATH=$ORACLE_HOME/bin:$PATH
 ./oracle_health_check.sh
 ```
 
-Run as Oracle user:
+Run with a custom report directory:
 
 ```bash
-sudo su - oracle
-cd /path/to/oracle-health-check
-./oracle_health_check.sh
+./oracle_health_check.sh --output-dir /var/tmp/oracle_health_reports
 ```
+
+## Notes
+
+- `lsnrctl` is optional. If it does not exist, listener checks are skipped.
+- FRA information depends on Oracle configuration and privileges.
+- Tablespace and diagnostic queries require access to Oracle dynamic and DBA views.
+- If the current user does not have the needed privileges, Oracle may return an error for some database sections while the rest of the report still prints.
 
 ## Troubleshooting
 
 If the script says `sqlplus is not available`:
 
-- check that Oracle client or database binaries are installed
-- check that `$ORACLE_HOME/bin` is in your `PATH`
+- check that Oracle binaries are installed
+- check that `$ORACLE_HOME/bin` is in `PATH`
 
-If the script says Oracle environment variables are missing:
+If the script says multiple PMON processes were found:
+
+- set `ORACLE_SID` to the instance you want to check
+
+Example:
+
+```bash
+export ORACLE_SID=PROD1
+./oracle_health_check.sh
+```
+
+If the script says `ORACLE_HOME` is not set:
 
 - set `ORACLE_HOME`
-- set `ORACLE_SID`
 - add `$ORACLE_HOME/bin` to `PATH`
 
-If listener status does not work:
+Example:
 
-- check whether `lsnrctl` exists on the server
-- check whether the current user can run it
+```bash
+export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+export PATH=$ORACLE_HOME/bin:$PATH
+```
 
 ## Read-Only Reminder
 
 This tool is for reporting only.
-It does not make any changes to the server or database.
+It does not make Oracle or OS configuration changes.

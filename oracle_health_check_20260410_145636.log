@@ -1,0 +1,48 @@
+
+================================================================================
+ORACLE SERVER HEALTH CHECK
+================================================================================
+This script is read-only.
+It reads health information and writes a report file.
+It does not make Oracle or OS configuration changes.
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+System details                 : OK       Hostname and date/time collected.
+Filesystem usage               : OK       Filesystem command is available.
+Memory usage                   : WARNING  Memory source is not available.
+Top CPU processes              : OK       Process list command is available.
+Oracle PMON                    : WARNING  No PMON processes were detected.
+Listener status                : SKIPPED  lsnrctl is not available.
+Database checks                : SKIPPED  sqlplus is not available.
+
+================================================================================
+SYSTEM DETAILS
+================================================================================
+Hostname                       : MacBookPro.lan
+Date/Time                      : 2026-04-10 14:56:36 BST
+Report file                    : /Users/michaeldsouza/Desktop/tools/oracle-health-check/oracle_health_check_20260410_145636.log
+
+OS UPTIME
+------------------------------------------------------------
+14:56  2 users, load averages: 12.79 9.72 7.90
+
+================================================================================
+FILESYSTEM USAGE
+================================================================================
+Filesystem     512-blocks      Used Available Capacity  Mounted on
+/dev/disk3s1s1  965595304  24325976 148764928    15%    /
+devfs                 433       433         0   100%    /dev
+/dev/disk3s6    965595304   8388912 148764928     6%    /System/Volumes/VM
+/dev/disk3s2    965595304  17340600 148764928    11%    /System/Volumes/Preboot
+/dev/disk3s4    965595304     26696 148764928     1%    /System/Volumes/Update
+/dev/disk1s2      1024000     12328    987192     2%    /System/Volumes/xarts
+/dev/disk1s1      1024000     11768    987192     2%    /System/Volumes/iSCPreboot
+/dev/disk1s3      1024000      2992    987192     1%    /System/Volumes/Hardware
+/dev/disk3s5    965595304 763916648 148764928    84%    /System/Volumes/Data
+map auto_home           0         0         0   100%    /System/Volumes/Data/home
+/dev/disk6s1        66160     31248     33648    49%    /Volumes/OnyX 4.9.8
+/dev/disk4s1       346112    284096     62016    83%    /Volumes/ChatGPT Installer
+/dev/disk7s1      1423280    946600    476680    67%    /Volumes/Codex Installer
+
