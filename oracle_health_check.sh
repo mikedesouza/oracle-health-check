@@ -345,7 +345,13 @@ exit
 SQL
   } 2>&1)"
 
-  printf '%s\n' "$output" | tr -d '\r' | awk 'NF {print; exit}'
+  printf '%s\n' "$output" | tr -d '\r' | awk '
+    NF {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+      print
+      exit
+    }
+  '
 }
 
 sqlplus_report_block() {
@@ -785,7 +791,9 @@ show_database_checks() {
 
   sqlplus_report_block "RAC INSTANCE STATUS" "select inst_id, instance_name, host_name, status, to_char(startup_time, 'YYYY-MM-DD HH24:MI:SS') as startup_time from gv\$instance order by inst_id;"
 
-  sqlplus_report_block "MULTITENANT SUMMARY" "select cdb, sys_context('USERENV', 'CON_NAME') as current_container from v\$database cross join dual; select con_id, name, open_mode from v\$pdbs order by con_id;"
+  sqlplus_report_block "MULTITENANT SUMMARY" "select cdb, sys_context('USERENV', 'CON_NAME') as current_container from v\$database;"
+
+  sqlplus_report_block "PDB STATUS" "select con_id, name, open_mode from v\$pdbs order by con_id;"
 
   sqlplus_report_block "INVALID OBJECTS COUNT" "select count(*) as invalid_objects from dba_objects where status <> 'VALID';"
 
@@ -797,7 +805,9 @@ show_database_checks() {
 
   sqlplus_report_block "TABLESPACE USAGE SUMMARY" "with data_files as (select tablespace_name, sum(bytes) / 1024 / 1024 as total_mb from dba_data_files group by tablespace_name), free_space as (select tablespace_name, sum(bytes) / 1024 / 1024 as free_mb from dba_free_space group by tablespace_name) select df.tablespace_name, round(df.total_mb, 2) as total_mb, round(df.total_mb - nvl(fs.free_mb, 0), 2) as used_mb, round(nvl(fs.free_mb, 0), 2) as free_mb, round(((df.total_mb - nvl(fs.free_mb, 0)) / df.total_mb) * 100, 2) as pct_used from data_files df left join free_space fs on df.tablespace_name = fs.tablespace_name order by pct_used desc, df.tablespace_name;"
 
-  sqlplus_report_block "ARCHIVE DESTINATION AND FRA USAGE" "select name, round(space_limit / 1024 / 1024 / 1024, 2) as space_limit_gb, round(space_used / 1024 / 1024 / 1024, 2) as space_used_gb, round((space_used / nullif(space_limit, 0)) * 100, 2) as fra_pct_used, number_of_files from v\$recovery_file_dest; select dest_id, status, destination, error from v\$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR') order by dest_id;"
+  sqlplus_report_block "ARCHIVE DESTINATION AND FRA USAGE" "select name, round(space_limit / 1024 / 1024 / 1024, 2) as space_limit_gb, round(space_used / 1024 / 1024 / 1024, 2) as space_used_gb, round((space_used / nullif(space_limit, 0)) * 100, 2) as fra_pct_used, number_of_files from v\$recovery_file_dest;"
+
+  sqlplus_report_block "ARCHIVE DESTINATION ERRORS" "select dest_id, status, destination, error from v\$archive_dest_status where status = 'ERROR' or (error is not null and trim(error) is not null and upper(error) <> 'NO ERROR') order by dest_id;"
 
   sqlplus_report_block "ALERT LOG LOCATION" "select name, value from v\$diag_info where name in ('Diag Trace', 'Diag Alert', 'Default Trace File');"
 }
