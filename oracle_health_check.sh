@@ -11,6 +11,7 @@ TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 DEFAULT_REPORT_FILE="$SCRIPT_DIR/oracle_health_check_${TIMESTAMP}.log"
 REPORT_FILE="$DEFAULT_REPORT_FILE"
 SILENT_MODE="false"
+SUMMARY_ONLY_MODE="false"
 
 DETECTED_PMON_SIDS=""
 ACTIVE_ORACLE_SID="${ORACLE_SID:-}"
@@ -72,31 +73,46 @@ DG_VIEW_AVAILABLE="N"
 show_help() {
   cat <<'HELP'
 Usage:
-  ./oracle_health_check.sh [-s] [-o report_file] [-h]
+  ./oracle_health_check.sh [-s] [-o report_file] [--summary-only] [-h]
 
 Options:
-  -o <file>   Write output to this report file
-  -s          Silent mode. Write report file only
-  -h          Show help
+  -o <file>        Write output to this report file
+  -s               Silent mode. Write report file only
+  --summary-only   Print only the top summary sections
+  -h               Show help
 HELP
 }
 
 parse_args() {
-  while getopts ":o:sh" opt; do
-    case "$opt" in
-      o) REPORT_FILE="$OPTARG" ;;
-      s) SILENT_MODE="true" ;;
-      h)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o)
+        if [[ $# -lt 2 ]]; then
+          echo "Option -o requires a value."
+          show_help
+          exit 1
+        fi
+        REPORT_FILE="$2"
+        shift 2
+        ;;
+      -s)
+        SILENT_MODE="true"
+        shift
+        ;;
+      --summary-only)
+        SUMMARY_ONLY_MODE="true"
+        shift
+        ;;
+      -h)
         show_help
         exit 0
         ;;
-      :)
-        echo "Option -$OPTARG requires a value."
-        show_help
-        exit 1
+      --)
+        shift
+        break
         ;;
-      \?)
-        echo "Unknown option: -$OPTARG"
+      *)
+        echo "Unknown option: $1"
         show_help
         exit 1
         ;;
@@ -874,6 +890,41 @@ show_listener_section() {
   show_listener_status
 }
 
+show_database_summary() {
+  print_header "DATABASE SUMMARY"
+
+  if [[ -z "$SQLPLUS_BIN" ]]; then
+    echo "sqlplus is not available."
+    echo "Database summary checks were skipped."
+    return
+  fi
+
+  print_kv "sqlplus path" "$SQLPLUS_BIN"
+
+  if [[ -z "$ACTIVE_ORACLE_HOME" || -z "$ACTIVE_ORACLE_SID" ]]; then
+    echo
+    show_missing_env_guidance
+    echo
+    echo "Database summary checks were skipped."
+    return
+  fi
+
+  echo
+  print_kv "Using ORACLE_HOME" "$ACTIVE_ORACLE_HOME"
+  print_kv "Using ORACLE_SID" "$ACTIVE_ORACLE_SID"
+  print_kv "Database role" "$DATABASE_ROLE"
+  print_kv "Open mode" "$OPEN_MODE"
+  print_kv "Archive log mode" "$ARCHIVE_LOG_MODE"
+  print_kv "Invalid objects count" "$DB_INVALID_OBJECTS"
+  print_kv "Failed jobs last 24h" "$DB_FAILED_JOBS_24H"
+  print_kv "Sessions usage percent" "$DB_SESSIONS_PCT"
+  print_kv "Processes usage percent" "$DB_PROCESSES_PCT"
+  print_kv "Temp usage percent" "$DB_TEMP_PCT"
+  print_kv "FRA usage percent" "$DB_FRA_PCT"
+  print_kv "FRA destination" "$DB_FRA_DEST"
+  print_kv "Alert log location" "$ALERT_LOG_LOCATION"
+}
+
 show_database_checks() {
   print_header "DATABASE CHECKS"
 
@@ -941,16 +992,23 @@ generate_report() {
 
   show_traffic_light_summary
   show_exceptions_summary
-  show_system_details
-  show_filesystem_usage
-  show_memory_section
-  show_cpu_section
-  show_pmon_section
-  show_listener_section
   show_oracle_environment_summary
   show_rac_summary
   show_dataguard_summary
-  show_database_checks
+  show_database_summary
+
+  if [[ "$SUMMARY_ONLY_MODE" == "true" ]]; then
+    echo
+    echo "Summary-only mode enabled. Detailed OS and database sections were skipped."
+  else
+    show_system_details
+    show_filesystem_usage
+    show_memory_section
+    show_cpu_section
+    show_pmon_section
+    show_listener_section
+    show_database_checks
+  fi
 
   echo
   print_line 80

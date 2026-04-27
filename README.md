@@ -48,6 +48,7 @@ The script displays:
 - listener status if `lsnrctl` exists
 - traffic light summary with `GREEN`, `AMBER`, and `RED`
 - exceptions summary that lists only non-green items
+- optional `--summary-only` mode for faster operator scans
 - RAC summary
 - multitenant summary
 - Data Guard summary
@@ -151,6 +152,18 @@ Use both together:
 ./oracle_health_check.sh -s -o /tmp/oracle_health_prod1.log
 ```
 
+Run summary-only mode:
+
+```bash
+./oracle_health_check.sh --summary-only
+```
+
+Use summary-only mode with a report file:
+
+```bash
+./oracle_health_check.sh --summary-only -o /tmp/oracle_health_summary.log
+```
+
 ## Exact Run Steps
 
 1. Copy this folder to your Linux Oracle server.
@@ -174,6 +187,8 @@ chmod +x oracle_health_check.sh
 ```
 
 6. The script prints the report and saves a report file.
+
+If you only want the top operator-focused sections, use `--summary-only`.
 
 ## Best Practice For Oracle Checks
 
