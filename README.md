@@ -47,6 +47,7 @@ The script displays:
 - Oracle PMON processes
 - listener status if `lsnrctl` exists
 - traffic light summary with `GREEN`, `AMBER`, and `RED`
+- exceptions summary that lists only non-green items
 - RAC summary
 - multitenant summary
 - Data Guard summary
@@ -115,6 +116,8 @@ At the top of the report, you will see a simple summary:
 - `RED` means a critical threshold was hit
 
 The script uses this logic for RAC and Data Guard too.
+
+Right below the traffic light summary, the report now includes an `EXCEPTIONS SUMMARY` section. This section only lists warning or critical items so an operator can quickly scan what needs attention.
 
 Examples:
 

@@ -675,6 +675,127 @@ show_traffic_light_summary() {
   print_status_line "Database checks" "$DATABASE_STATUS" "$DATABASE_DETAIL_MESSAGE"
 }
 
+show_exceptions_summary() {
+  local found="0"
+  local item_status=""
+
+  print_header "EXCEPTIONS SUMMARY"
+
+  if [[ "$OVERALL_STATUS" == "GREEN" ]]; then
+    echo "No exceptions detected. All tracked summary checks are GREEN."
+    return
+  fi
+
+  if [[ "$FILESYSTEM_STATUS" != "GREEN" ]]; then
+    print_status_line "Filesystem usage" "$FILESYSTEM_STATUS" "Review filesystem section for missing command output or warnings."
+    found="1"
+  fi
+
+  if [[ "$MEMORY_STATUS" != "GREEN" ]]; then
+    print_status_line "Memory usage" "$MEMORY_STATUS" "Review memory section for missing command output or warnings."
+    found="1"
+  fi
+
+  if [[ "$CPU_STATUS" != "GREEN" ]]; then
+    print_status_line "Top CPU processes" "$CPU_STATUS" "Review process section for missing command output or warnings."
+    found="1"
+  fi
+
+  if [[ "$PMON_STATUS" != "GREEN" ]]; then
+    print_status_line "Oracle PMON" "$PMON_STATUS" "PMON processes were not detected or could not be read."
+    found="1"
+  fi
+
+  if [[ "$LISTENER_STATUS_SUMMARY" != "GREEN" ]]; then
+    print_status_line "Listener status" "$LISTENER_STATUS_SUMMARY" "lsnrctl was unavailable or listener checks were skipped."
+    found="1"
+  fi
+
+  if [[ "$RAC_STATUS_SUMMARY" != "GREEN" ]]; then
+    print_status_line "RAC status" "$RAC_STATUS_SUMMARY" "$RAC_DETAIL_MESSAGE"
+    found="1"
+  fi
+
+  if [[ "$DG_STATUS_SUMMARY" != "GREEN" ]]; then
+    print_status_line "Data Guard status" "$DG_STATUS_SUMMARY" "$DG_DETAIL_MESSAGE"
+    found="1"
+  fi
+
+  if [[ "$DATABASE_STATUS" != "GREEN" ]]; then
+    print_status_line "Database checks" "$DATABASE_STATUS" "$DATABASE_DETAIL_MESSAGE"
+    found="1"
+  fi
+
+  if value_known_number "$DB_INVALID_OBJECTS" && number_ge "$DB_INVALID_OBJECTS" 1; then
+    if number_ge "$DB_INVALID_OBJECTS" 100; then
+      item_status="RED"
+    else
+      item_status="AMBER"
+    fi
+    print_status_line "Invalid objects" "$item_status" "$DB_INVALID_OBJECTS invalid objects found."
+    found="1"
+  fi
+
+  if value_known_number "$DB_FAILED_JOBS_24H" && number_ge "$DB_FAILED_JOBS_24H" 1; then
+    if number_ge "$DB_FAILED_JOBS_24H" 10; then
+      item_status="RED"
+    else
+      item_status="AMBER"
+    fi
+    print_status_line "Failed jobs 24h" "$item_status" "$DB_FAILED_JOBS_24H scheduler jobs failed in the last 24 hours."
+    found="1"
+  fi
+
+  if value_known_number "$DB_SESSIONS_PCT" && number_ge "$DB_SESSIONS_PCT" 85; then
+    if number_ge "$DB_SESSIONS_PCT" 95; then
+      item_status="RED"
+    else
+      item_status="AMBER"
+    fi
+    print_status_line "Sessions usage" "$item_status" "$DB_SESSIONS_PCT percent of session limit is in use."
+    found="1"
+  fi
+
+  if value_known_number "$DB_PROCESSES_PCT" && number_ge "$DB_PROCESSES_PCT" 85; then
+    if number_ge "$DB_PROCESSES_PCT" 95; then
+      item_status="RED"
+    else
+      item_status="AMBER"
+    fi
+    print_status_line "Processes usage" "$item_status" "$DB_PROCESSES_PCT percent of process limit is in use."
+    found="1"
+  fi
+
+  if value_known_number "$DB_TEMP_PCT" && number_ge "$DB_TEMP_PCT" 85; then
+    if number_ge "$DB_TEMP_PCT" 95; then
+      item_status="RED"
+    else
+      item_status="AMBER"
+    fi
+    print_status_line "Temp usage" "$item_status" "$DB_TEMP_PCT percent of temp space is in use."
+    found="1"
+  fi
+
+  if value_known_number "$DB_FRA_PCT" && number_ge "$DB_FRA_PCT" 85; then
+    if number_ge "$DB_FRA_PCT" 95; then
+      item_status="RED"
+    else
+      item_status="AMBER"
+    fi
+    print_status_line "FRA usage" "$item_status" "$DB_FRA_PCT percent of FRA is in use."
+    found="1"
+  fi
+
+  if [[ "$FORCE_LOGGING" == "NO" && "$DATABASE_ROLE" == "PRIMARY" ]]; then
+    print_status_line "Force logging" "AMBER" "Primary database is not in force logging mode."
+    found="1"
+  fi
+
+  if [[ "$found" == "0" ]]; then
+    echo "Exceptions summary did not find any individual warning lines. Review the detailed sections if needed."
+  fi
+}
+
 show_rac_summary() {
   print_header "RAC SUMMARY"
   print_kv "Detected mode" "$RAC_MODE"
@@ -819,6 +940,7 @@ generate_report() {
   echo "It does not make Oracle, RAC, Data Guard, or OS configuration changes."
 
   show_traffic_light_summary
+  show_exceptions_summary
   show_system_details
   show_filesystem_usage
   show_memory_section
