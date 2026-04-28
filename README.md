@@ -1,130 +1,77 @@
 # Oracle Health Check Tool
 
-This project is a beginner-friendly, read-only Oracle health check tool for Linux Oracle database servers.
+A read-only Oracle health check script for Linux database servers.
 
-The main script is:
-
-- `oracle_health_check.sh`
-
-It collects Linux server details and Oracle database details when Oracle tools and environment settings are available.
+`oracle_health_check.sh` collects operating system, Oracle listener, database, RAC, multitenant, and Data Guard information when the required Oracle tools and environment are available. It prints a plain text report and saves the same output to a timestamped log file by default.
 
 ## Safety
 
-This script is safe and read-only.
+This tool is designed for reporting only. It does not start, stop, create, delete, modify, or reconfigure Oracle, RAC, Data Guard, listener, database objects, or Linux settings.
 
-It does not:
+The script only:
 
-- start or stop Oracle
-- change database settings
-- create database objects
-- modify listener configuration
-- change RAC configuration
-- change Data Guard configuration
-- delete or update server files
+- reads OS and Oracle health information
+- runs read-only SQL queries through `sqlplus`
+- writes a text report file
 
-It only reads information and writes a plain text report file.
+## Requirements
 
-## New Features In This Version
+Minimum requirements for OS-level checks:
 
-- RAC awareness
-- multitenant awareness
-- Data Guard awareness
-- traffic light logic for RAC and Data Guard
-- graceful handling when RAC or Data Guard views are unavailable
-- clear section-based output
-- beginner-friendly comments inside the script
+- Linux shell environment
+- `bash`
+- standard Linux tools such as `date`, `hostname`, `df`, `free`, `ps`, and `uptime`
 
-## What It Checks
+Optional Oracle requirements for database-level checks:
 
-The script displays:
+- Oracle database server access
+- `sqlplus`
+- `ORACLE_HOME`
+- `ORACLE_SID`
+- permission to connect locally as `/ as sysdba`
 
-- hostname
-- date and time
-- OS uptime
-- filesystem usage
-- memory usage
-- top CPU processes
-- Oracle PMON processes
-- listener status if `lsnrctl` exists
-- traffic light summary with `GREEN`, `AMBER`, and `RED`
-- exceptions summary that lists only non-green items
-- optional `--summary-only` mode for faster operator scans
-- RAC summary
-- multitenant summary
-- Data Guard summary
-- database instance status if `sqlplus` works
-- invalid objects count
-- failed scheduler jobs in last 24 hours
-- sessions vs processes usage
-- temp tablespace usage
-- archive destination / FRA usage where available
-- tablespace usage summary
-- alert log location if available
+Optional Oracle tools:
 
-## RAC Awareness
+- `lsnrctl` for listener status
 
-The script detects whether the database is:
+If Oracle variables or tools are missing, the script still runs the OS sections and explains which database checks were skipped.
 
-- standalone
-- RAC
+## Quick Start
 
-The RAC summary section shows:
+Copy the folder to the Oracle database server, then run:
 
-- whether cluster database is enabled
-- current instance name
-- host name
-- all instances from `gv$instance`
-- instance status and startup time
+```bash
+cd /path/to/oracle-health-check
+chmod +x oracle_health_check.sh
+./oracle_health_check.sh
+```
 
-If `gv$instance` is unavailable, the script handles that safely and continues.
+By default, the script prints the report to the terminal and saves a timestamped log file in the script directory:
 
-The script also checks multitenant information when available:
+```text
+oracle_health_check_YYYYMMDD_HHMMSS.log
+```
 
-- whether the database is a CDB
-- current container name
-- PDB count
+For full database results, run as the Oracle software owner or another user that can connect locally as SYSDBA:
 
+```bash
+sudo su - oracle
+cd /path/to/oracle-health-check
+./oracle_health_check.sh
+```
 
-## Data Guard Awareness
+## Oracle Environment Setup
 
-The script detects whether the database is:
+For best results, set the Oracle environment before running the script:
 
-- `PRIMARY`
-- `PHYSICAL STANDBY`
-- `LOGICAL STANDBY`
+```bash
+export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
+export ORACLE_SID=ORCL
+export PATH=$ORACLE_HOME/bin:$PATH
+./oracle_health_check.sh
+```
 
-The Data Guard summary section shows:
-
-- database role
-- open mode
-- protection mode
-- switchover status
-- force logging
-- archive log mode
-- transport lag if available
-- apply lag if available
-- managed recovery status if standby
-- archive destination errors if any
-
-If Data Guard views are unavailable, the script handles that safely and continues.
-
-## Traffic Light Summary
-
-At the top of the report, you will see a simple summary:
-
-- `GREEN` means healthy
-- `AMBER` means a warning or something needs attention
-- `RED` means a critical threshold was hit
-
-The script uses this logic for RAC and Data Guard too.
-
-Right below the traffic light summary, the report now includes an `EXCEPTIONS SUMMARY` section. This section only lists warning or critical items so an operator can quickly scan what needs attention.
-
-Examples:
-
-- `RED` for critical RAC or Data Guard issues
-- `AMBER` for warning situations such as lag thresholds or unavailable views
-- `GREEN` when the checks look healthy
+If `ORACLE_HOME` is not set, the script tries to resolve it from the `sqlplus` path. If `ORACLE_SID` is not set and exactly one PMON process is found, the script uses that SID automatically. If multiple PMON processes are found, set `ORACLE_SID` explicitly.
 
 ## Command Line Options
 
@@ -134,158 +81,196 @@ Show help:
 ./oracle_health_check.sh -h
 ```
 
-Run silently and only write the report file:
-
-```bash
-./oracle_health_check.sh -s
-```
-
 Write to a specific report file:
 
 ```bash
 ./oracle_health_check.sh -o /tmp/oracle_health_prod1.log
 ```
 
-Use both together:
+Run silently and only write the report file:
 
 ```bash
-./oracle_health_check.sh -s -o /tmp/oracle_health_prod1.log
+./oracle_health_check.sh -s
 ```
 
-Run summary-only mode:
+Print only the top summary sections:
 
 ```bash
 ./oracle_health_check.sh --summary-only
 ```
 
-Use summary-only mode with a report file:
+Combine options:
 
 ```bash
-./oracle_health_check.sh --summary-only -o /tmp/oracle_health_summary.log
+./oracle_health_check.sh --summary-only -s -o /tmp/oracle_health_summary.log
 ```
 
-## Exact Run Steps
+## What The Report Includes
 
-1. Copy this folder to your Linux Oracle server.
-2. Open a terminal session on the Linux server.
-3. Go to the folder:
+The report starts with operator-focused summary sections:
 
-```bash
-cd /path/to/oracle-health-check
-```
+- traffic light summary
+- exceptions summary with only non-green items
+- resolved Oracle environment
+- RAC summary
+- Data Guard summary
+- database summary
 
-4. Make the script executable:
+In normal mode, it also includes detailed sections for:
 
-```bash
-chmod +x oracle_health_check.sh
-```
+- hostname, date, time, and uptime
+- filesystem usage
+- memory usage
+- top CPU processes
+- Oracle PMON processes
+- listener status when `lsnrctl` is available
+- database instance status
+- RAC instance status
+- multitenant and PDB status
+- invalid objects count
+- failed scheduler jobs in the last 24 hours
+- sessions and processes usage
+- temp tablespace usage
+- tablespace usage summary
+- FRA and archive destination usage
+- archive destination errors
+- alert log locations
 
-5. Run the script:
+Use `--summary-only` when you only want the high-level sections and exception list.
 
-```bash
-./oracle_health_check.sh
-```
+## Traffic Light Status
 
-6. The script prints the report and saves a report file.
+The script uses simple status labels:
 
-If you only want the top operator-focused sections, use `--summary-only`.
+- `GREEN`: the tracked check completed without a warning threshold
+- `AMBER`: review is recommended
+- `RED`: a critical threshold or failure condition was detected
 
-## Best Practice For Oracle Checks
+The overall status becomes `AMBER` or `RED` when any tracked section reaches that level.
 
-If you want full Oracle database results, load the Oracle environment first.
+## Thresholds
 
-Example:
+Database warning thresholds:
 
-```bash
-export ORACLE_HOME=/u01/app/oracle/product/19.0.0/dbhome_1
-export ORACLE_SID=ORCL
-export PATH=$ORACLE_HOME/bin:$PATH
-./oracle_health_check.sh
-```
+- invalid objects: 1 or more is `AMBER`
+- failed scheduler jobs in last 24 hours: 1 or more is `AMBER`
+- sessions or processes usage: 85% or higher is `AMBER`
+- temp usage: 85% or higher is `AMBER`
+- FRA usage: 85% or higher is `AMBER`
+- Data Guard transport or apply lag: 15 minutes or higher is `AMBER`
 
-If your site uses the Oracle user:
+Database critical thresholds:
 
-```bash
-sudo su - oracle
-cd /path/to/oracle-health-check
-./oracle_health_check.sh -o /tmp/oracle_health_orcl.log
-```
+- invalid objects: 100 or more is `RED`
+- failed scheduler jobs in last 24 hours: 10 or more is `RED`
+- sessions or processes usage: 95% or higher is `RED`
+- temp usage: 95% or higher is `RED`
+- FRA usage: 95% or higher is `RED`
+- Data Guard transport or apply lag: 60 minutes or higher is `RED`
+- archive destination errors are `RED`
+- physical standby managed recovery not running is `RED`
+- RAC instances not `OPEN` or `MOUNTED` are `RED`
 
-## RAC Examples
+Missing optional tools or unavailable Oracle views are usually reported as `AMBER` so the report can continue safely.
 
-Run on a RAC server and write the report to a named file:
+## RAC Checks
 
-```bash
-./oracle_health_check.sh -o /tmp/rac_health_orcl1.log
-```
+The RAC summary uses multiple signals:
 
-If multiple PMON processes are found, set `ORACLE_SID` explicitly:
+- `cluster_database` from `v$parameter`
+- instance count from `gv$instance`
+- PMON process discovery as a fallback
+
+When RAC information is available, the report shows:
+
+- detected mode: standalone, RAC, or unknown
+- cluster database setting
+- current instance name, host, status, and startup time
+- `gv$instance` count
+- all instances from `gv$instance`
+
+If `gv$instance` cannot be read, the script marks the RAC section as `AMBER` and continues.
+
+Example RAC run:
 
 ```bash
 export ORACLE_SID=ORCL1
 ./oracle_health_check.sh -o /tmp/orcl1_health.log
 ```
 
-## Data Guard Examples
+## Multitenant Checks
 
-Run on a primary database server:
+When database views are available, the report shows:
+
+- whether the database is a CDB
+- current container name
+- PDB count
+- PDB open modes in the detailed database section
+
+These checks rely on `v$database`, `v$pdbs`, and `sys_context('USERENV', 'CON_NAME')`.
+
+## Data Guard Checks
+
+The Data Guard summary reports:
+
+- database role
+- open mode
+- protection mode
+- switchover status
+- force logging
+- archive log mode
+- transport lag
+- apply lag
+- managed recovery status on standby databases
+- archive destination errors
+
+Example primary run:
 
 ```bash
 export ORACLE_SID=PROD1
 ./oracle_health_check.sh -o /tmp/prod1_primary_health.log
 ```
 
-Run on a standby database server:
+Example standby run:
 
 ```bash
 export ORACLE_SID=PROD1STB
 ./oracle_health_check.sh -o /tmp/prod1_standby_health.log
 ```
 
-## Handling Missing Oracle Variables
+If Data Guard views are unavailable or the current user lacks privileges, the script marks the section as `AMBER` and continues with the rest of the report.
 
-The script handles missing Oracle variables gracefully.
+## Troubleshooting
 
-If `ORACLE_HOME` is missing:
+If database checks are skipped:
 
-- the script still runs OS checks
-- it checks whether `sqlplus` is already on `PATH`
-- if possible, it resolves `ORACLE_HOME` from the `sqlplus` binary path
-- if needed, it explains that database checks were skipped
+- confirm `sqlplus` is installed or on `PATH`
+- confirm `ORACLE_HOME` is set correctly
+- confirm `ORACLE_SID` is set correctly
+- run as the Oracle software owner if local SYSDBA authentication is required
 
-If `ORACLE_SID` is missing:
-
-- the script still runs OS checks
-- if exactly one PMON process is found, it uses that SID automatically
-- if multiple PMON processes are found, it tells you to set `ORACLE_SID` explicitly
-
-## Troubleshooting Real RAC Servers
-
-If your server has multiple PMON processes, set `ORACLE_SID` to the specific instance you want to query before running the script.
-
-Example:
+If multiple PMON processes are found:
 
 ```bash
 export ORACLE_SID=ivory1
 ./oracle_health_check.sh -o /tmp/rac_health_ivory1.log
 ```
 
-For RAC detection, the script now uses multiple signals:
+If listener checks are skipped:
 
-- `cluster_database` from `v$parameter`
-- instance count from `gv$instance`
-- PMON detection as a fallback
+- confirm `lsnrctl` is on `PATH`
+- confirm `ORACLE_HOME/bin` is included in `PATH`
 
-For multitenant visibility, it checks `v$database`, `sys_context('USERENV','CON_NAME')`, and `v$pdbs` when available.
+If RAC, multitenant, FRA, or Data Guard details are incomplete:
+
+- confirm the connected user has privileges to read the required dynamic performance views
+- review the detailed database section for Oracle errors
+- verify the feature is configured for that database
 
 ## Notes
 
-- `lsnrctl` is optional. If it does not exist, listener checks are skipped.
-- FRA information depends on Oracle configuration and privileges.
+- `lsnrctl` is optional.
+- FRA information depends on Oracle recovery area configuration.
 - RAC and Data Guard sections rely on Oracle dynamic performance views.
-- If the current user does not have the needed privileges, Oracle may return limited data for some sections while the rest of the report still prints.
-
-## Read-Only Reminder
-
-This tool is for reporting only.
-It does not make Oracle, RAC, Data Guard, or OS configuration changes.
+- The report is a point-in-time health snapshot, not a monitoring daemon.
+- The script continues when optional views or tools are unavailable.
